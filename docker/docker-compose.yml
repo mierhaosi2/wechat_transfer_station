@@ -1,0 +1,16 @@
+version: '2.0'
+services:
+  dify-on-wechat:
+    image: hanfangyuan/dify-on-wechat
+    container_name: dify-on-wechat
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      DIFY_API_BASE: 'https://api.dify.ai/v1'
+      DIFY_API_KEY: 'app-xx'
+      DIFY_APP_TYPE: 'chatbot'
+      MODEL: 'dify'
+      SINGLE_CHAT_PREFIX: '[""]'
+      SINGLE_CHAT_REPLY_PREFIX: '""'
+      GROUP_CHAT_PREFIX: '["@bot"]'
+      GROUP_NAME_WHITE_LIST: '["ALL_GROUP"]'
