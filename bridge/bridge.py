@@ -11,11 +11,7 @@ from voice.factory import create_voice
 @singleton
 class Bridge(object):
     def __init__(self):
-        model = conf().get("model", const.DIFY)
-        if model == const.WEBHOOK:
-            chat_type = const.WEBHOOK
-        else:
-            chat_type = const.DIFY
+        chat_type = conf().get("model", const.WEBHOOK)
         self.btype = {
             "chat": chat_type,
             "voice_to_text": conf().get("voice_to_text", ""),
