@@ -13,21 +13,37 @@ class WebhookBot(Bot):
 
     外部服务接收 POST JSON：
     {
-        "msg_id":               "消息ID",
-        "query":                "用户消息内容",
-        "session_id":           "会话ID",
-        "is_group":             true/false,
-        "from_user_id":         "发送人ID",
-        "from_user_nickname":   "发送人昵称",
-        "other_user_id":        "群ID 或 私聊对方ID",
-        "other_user_nickname":  "群名 或 私聊对方昵称"
+        "msg_id": "消息ID",
+        "query": "用户消息内容",
+        "session_id": "会话ID",
+        "is_group": true/false,
+        "sender_id": "发送人ID",
+        "sender_name": "发送人昵称",
+        "group_id": "群ID（群聊时）",
+        "group_name": "群名（群聊时）"
     }
 
-    外部服务返回 JSON：
+    外部服务返回 JSON 示例：
+
+    1) 纯文本（默认）
+    {"reply": "你好"}
+
+    2) 图片
+    {"reply_type": "image", "image_url": "https://example.com/a.png"}
+
+    3) 链接/图文卡片
     {
-        "reply": "回复内容"
+        "reply_type": "link_card",
+        "title": "标题",
+        "desc": "描述",
+        "url": "https://example.com",
+        "image_url": "https://example.com/cover.png"
     }
-    或直接返回字符串。
+    或使用 link_card 对象：
+  {
+        "reply_type": "link_card",
+        "link_card": {"title": "...", "desc": "...", "url": "...", "image_url": "..."}
+    }
     """
 
     def reply(self, query, context: Context = None) -> Reply:
@@ -59,13 +75,9 @@ class WebhookBot(Bot):
             resp.raise_for_status()
 
             data = resp.json()
-            if isinstance(data, dict):
-                reply_text = data.get("reply") or data.get("content") or data.get("message") or str(data)
-            else:
-                reply_text = str(data)
-
-            logger.info(f"[Webhook] 回复内容: {reply_text}")
-            return Reply(ReplyType.TEXT, reply_text)
+            reply = self._parse_response(data)
+            logger.info(f"[Webhook] 回复: type={reply.type}, content={reply.content}")
+            return reply
 
         except requests.Timeout:
             logger.error(f"[Webhook] 请求超时 ({timeout}s): {webhook_url}")
@@ -73,6 +85,59 @@ class WebhookBot(Bot):
         except requests.HTTPError as e:
             logger.error(f"[Webhook] HTTP错误: {e}")
             return Reply(ReplyType.ERROR, f"服务返回错误: {e}")
+        except ValueError as e:
+            logger.error(f"[Webhook] 响应解析失败: {e}")
+            return Reply(ReplyType.ERROR, str(e))
         except Exception as e:
             logger.error(f"[Webhook] 调用失败: {e}")
             return Reply(ReplyType.ERROR, f"调用失败: {e}")
+
+    def _parse_response(self, data) -> Reply:
+        if not isinstance(data, dict):
+            return Reply(ReplyType.TEXT, str(data))
+
+        reply_type = (data.get("reply_type") or data.get("type") or "").lower().strip()
+
+        # 链接/图文卡片
+        if reply_type in ("link_card", "link", "card", "sharing"):
+            card = data.get("link_card") or data
+            url = card.get("url") or data.get("url")
+            if not url:
+                raise ValueError("link_card 缺少 url 字段")
+            return Reply(
+                ReplyType.LINK_CARD,
+                {
+                    "title": card.get("title") or data.get("title") or url,
+                    "desc": card.get("desc") or data.get("description") or data.get("desc") or "",
+                    "url": url,
+                    "image_url": card.get("image_url") or data.get("image_url") or "",
+                },
+            )
+
+        # 仅返回 url 时，按链接卡片发送
+        if data.get("url") and not data.get("reply") and not data.get("content") and not data.get("message"):
+            return Reply(
+                ReplyType.LINK_CARD,
+                {
+                    "title": data.get("title") or data["url"],
+                    "desc": data.get("desc") or data.get("description") or "",
+                    "url": data["url"],
+                    "image_url": data.get("image_url") or "",
+                },
+            )
+
+        # 图片
+        if reply_type in ("image", "image_url"):
+            image_url = data.get("image_url") or data.get("url")
+            if not image_url:
+                raise ValueError("image 类型缺少 image_url 字段")
+            return Reply(ReplyType.IMAGE_URL, image_url)
+
+        if data.get("image_url") and not data.get("reply") and not data.get("content"):
+            return Reply(ReplyType.IMAGE_URL, data["image_url"])
+
+        # 默认文本
+        reply_text = data.get("reply") or data.get("content") or data.get("message")
+        if reply_text is None:
+            reply_text = str(data)
+        return Reply(ReplyType.TEXT, reply_text)

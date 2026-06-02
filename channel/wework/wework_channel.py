@@ -313,6 +313,17 @@ class WeworkChannel(ChatChannel):
 
             wework.send_image(receiver, file_path=image_path)
             logger.info("[WX] sendImage url={}, receiver={}".format(img_url, receiver))
+        elif reply.type == ReplyType.LINK_CARD:
+            card = reply.content if isinstance(reply.content, dict) else {}
+            title = card.get("title") or card.get("url") or "链接"
+            desc = card.get("desc") or ""
+            url = card.get("url")
+            image_url = card.get("image_url") or ""
+            if not url:
+                wework.send_text(receiver, "链接卡片缺少 url")
+            else:
+                wework.send_link_card(receiver, title, desc, url, image_url)
+                logger.info("[WX] sendLinkCard title={}, url={}, receiver={}".format(title, url, receiver))
         elif reply.type == ReplyType.VIDEO_URL:
             video_url = reply.content
             filename = str(uuid.uuid4())

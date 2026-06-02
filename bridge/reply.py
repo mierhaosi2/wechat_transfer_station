@@ -17,6 +17,7 @@ class ReplyType(Enum):
     TEXT_ = 11  # 强制文本
     VIDEO = 12
     MINIAPP = 13  # 小程序
+    LINK_CARD = 14  # 链接/图文卡片（企微 ntwork）
 
     def __str__(self):
         return self.name

@@ -75,13 +75,37 @@ python app.py
 
 ### 响应（JSON）
 
+**纯文本（默认）**
+
 ```json
 {
   "reply": "回复内容"
 }
 ```
 
-也支持直接返回字符串，或含 `content` / `message` 字段的 JSON。
+**图片**
+
+```json
+{
+  "reply_type": "image",
+  "image_url": "https://example.com/a.png"
+}
+```
+
+**链接 / 图文卡片**（标题 + 描述 + 链接 + 封面图，由企微以卡片形式展示）
+
+```json
+{
+  "reply_type": "link_card",
+  "title": "文章标题",
+  "desc": "摘要描述",
+  "url": "https://example.com/article",
+  "image_url": "https://example.com/cover.jpg"
+}
+```
+
+也支持 `reply_type` 为 `link`，或只返回 `url`（可选 `title`、`desc`、`image_url`）。  
+文本字段仍兼容 `content` / `message`。
 
 ---
 
