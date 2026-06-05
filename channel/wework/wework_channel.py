@@ -3,8 +3,6 @@ import os
 import random
 import tempfile
 import threading
-os.environ['ntwork_LOG'] = "ERROR"
-import ntwork
 import requests
 import uuid
 
@@ -230,6 +228,17 @@ class WeworkChannel(ChatChannel):
         if cmsg.from_user_id == cmsg.to_user_id:
             # ignore self reply
             return
+
+        sender_uid = cmsg.actual_user_id or cmsg.other_user_id or ""
+        logger.info("[WX][单聊] 收到消息 user_id={} nickname={} content={}".format(
+            sender_uid, cmsg.other_user_nickname, cmsg.content
+        ))
+
+        user_id_black_list = conf().get("user_id_black_list", [])
+        if sender_uid and sender_uid in user_id_black_list:
+            logger.info("[WX][单聊] user_id={} 在黑名单中，跳过不回复".format(sender_uid))
+            return
+
         if cmsg.ctype == ContextType.VOICE:
             if not conf().get("speech_recognition"):
                 return

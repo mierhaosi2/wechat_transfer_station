@@ -28,6 +28,7 @@ available_setting = {
     "group_name_keyword_white_list": [],
     "group_chat_in_one_session": [],
     "nick_name_black_list": [],
+    "user_id_black_list": [],
     "group_welcome_msg": "",
     "trigger_by_self": False,
     "concurrency_in_session": 1,
