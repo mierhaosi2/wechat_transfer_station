@@ -69,6 +69,8 @@ class WebhookBot(Bot):
             "is_group": msg.is_group if msg else False,
             "sender_id": msg.actual_user_id if msg else "",
             "sender_name": msg.actual_user_nickname if msg else "",
+            "is_internal_user": context.get("is_internal_user", False),
+            "silence_mode": context.get("silence_mode", False),
         }
         if msg and msg.is_group and msg.other_user_id:
             payload["group_id"] = msg.other_user_id

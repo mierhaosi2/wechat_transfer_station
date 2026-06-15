@@ -73,6 +73,8 @@ available_setting = {
 
     # 企业微信个人号(wework)配置
     "wework_smart": True,
+    "wework_ignore_internal_users": False,        # 是否完全忽略内部用户消息（True=静音，False=仅静默计时）
+    "wework_internal_user_silence_seconds": 180,  # 内部用户发言后机器人静默秒数，默认3分钟
     # 是否忽略企业微信内部用户的消息（通过 appinfo 字段判断：纯数字=个人微信，含字母=企微内部）
     "wework_ignore_internal_users": True,
 

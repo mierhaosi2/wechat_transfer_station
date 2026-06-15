@@ -6,6 +6,7 @@ import threading
 import requests
 import ntwork
 import uuid
+import time
 
 from bridge.context import *
 from bridge.reply import *
@@ -21,6 +22,8 @@ from channel.wework.run import wework
 from channel.wework import run
 from PIL import Image
 
+# 记录每个群最近一次内部用户发言的时间戳 {group_id: timestamp}
+_internal_user_last_msg_time: dict = {}
 
 def get_wxid_by_name(room_members, group_wxid, name):
     if group_wxid in room_members:
@@ -278,8 +281,34 @@ class WeworkChannel(ChatChannel):
             user_type, appinfo,
             cmsg.content
         ))
-        if is_internal_user and conf().get("wework_ignore_internal_users", False):
-            logger.info("[WX][群消息] 发送人={} 为企业微信内部用户，跳过不回复".format(cmsg.actual_user_nickname))
+        group_id = cmsg.other_user_id
+        silence_seconds = conf().get("wework_internal_user_silence_seconds", 180)
+
+        if is_internal_user:
+            # 内部用户发言：更新静默计时器，转发给服务（用于会话记录），但不发回复
+            _internal_user_last_msg_time[group_id] = time.time()
+            logger.info("[WX][群消息] 内部用户 {} 发言，群 {} 进入 {}s 静默，消息将转发服务".format(
+                cmsg.actual_user_nickname, group_id, silence_seconds))
+            silence_mode = True
+        else:
+            # 外部用户发言：检查该群是否在静默期（静默期内仍转发给服务，但不发回复）
+            # 例外：@ 了机器人，无论静默与否都正常回复
+            last_internal_time = _internal_user_last_msg_time.get(group_id, 0)
+            elapsed = time.time() - last_internal_time
+            if cmsg.is_at:
+                silence_mode = False
+                logger.info("[WX][群消息] 消息 @ 了机器人，忽略静默状态，正常回复")
+            else:
+                silence_mode = elapsed < silence_seconds
+                if silence_mode:
+                    remaining = int(silence_seconds - elapsed)
+                    logger.info("[WX][群消息] 群 {} 静默中（还剩 {}s），消息将转发服务但不发送回复".format(group_id, remaining))
+
+        # 外部用户 @ 了他人（非机器人）：说明这条消息是发给真人的，不回复
+        raw_at_list = cmsg._rawmsg.get('data', {}).get('at_list', [])
+        if raw_at_list and not cmsg.is_at:
+            at_names = [a.get('nickname', '') for a in raw_at_list]
+            logger.info("[WX][群消息] 外部用户 @ 了内部用户 {}，机器人不介入".format(at_names))
             return
         if cmsg.ctype == ContextType.VOICE:
             if not conf().get("speech_recognition"):
@@ -287,7 +316,18 @@ class WeworkChannel(ChatChannel):
             logger.debug("[WX]receive voice for group msg: {}".format(cmsg.content))
         elif cmsg.ctype == ContextType.IMAGE:
             logger.debug("[WX]receive image for group msg: {}".format(cmsg.content))
-        elif cmsg.ctype in [ContextType.JOIN_GROUP, ContextType.PATPAT]:
+        elif cmsg.ctype == ContextType.JOIN_GROUP:
+            welcome_msg = conf().get("group_welcome_msg", "")
+            nickname = cmsg.actual_user_nickname or "新成员"
+            group_id = cmsg.other_user_id
+            if welcome_msg:
+                text = welcome_msg.replace("{nickname}", nickname)
+            else:
+                text = f"欢迎 {nickname} 加入群聊！😊"
+            logger.info(f"[WX][入群欢迎] 群={group_id} 新成员={nickname}")
+            wework.send_text(group_id, text)
+            return
+        elif cmsg.ctype == ContextType.PATPAT:
             logger.debug("[WX]receive note msg: {}".format(cmsg.content))
         elif cmsg.ctype == ContextType.TEXT:
             pass
@@ -295,10 +335,16 @@ class WeworkChannel(ChatChannel):
             logger.debug("[WX]receive group msg: {}".format(cmsg.content))
         context = self._compose_context(cmsg.ctype, cmsg.content, isgroup=True, msg=cmsg)
         if context:
+            if silence_mode:
+                context["silence_mode"] = True
+            context["is_internal_user"] = is_internal_user
             self.produce(context)
 
     # 统一的发送函数，每个Channel自行实现，根据reply的type字段发送不同类型的消息
     def send(self, reply: Reply, context: Context):
+        if context and context.get("silence_mode"):
+            logger.info("[WX][静默模式] 群 {} 静默期内，已调用服务但不发送回复".format(context.get("receiver")))
+            return
         logger.debug(f"context: {context}")
         receiver = context["receiver"]
         actual_user_id = context["msg"].actual_user_id
@@ -344,6 +390,26 @@ class WeworkChannel(ChatChannel):
             else:
                 wework.send_link_card(receiver, title, desc, url, image_url)
                 logger.info("[WX] sendLinkCard title={}, url={}, receiver={}".format(title, url, receiver))
+        elif reply.type == ReplyType.GIF_URL:
+            gif_url = reply.content
+            filename = str(uuid.uuid4()) + ".gif"
+            directory = os.path.join(os.getcwd(), "tmp")
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+            gif_path = os.path.join(directory, filename)
+            try:
+                resp = requests.get(gif_url, stream=True, timeout=30)
+                with open(gif_path, "wb") as f:
+                    for block in resp.iter_content(1024):
+                        f.write(block)
+                wework.send_gif(receiver, gif_path)
+                logger.info("[WX] sendGif url={}, receiver={}".format(gif_url, receiver))
+            except Exception as e:
+                logger.error("[WX] sendGif failed: {}".format(e))
+                wework.send_text(receiver, "GIF 发送失败")
+            finally:
+                if os.path.exists(gif_path):
+                    os.remove(gif_path)
         elif reply.type == ReplyType.VIDEO_URL:
             video_url = reply.content
             filename = str(uuid.uuid4())
