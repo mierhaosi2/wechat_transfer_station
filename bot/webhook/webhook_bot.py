@@ -105,7 +105,17 @@ class WebhookBot(Bot):
         if not isinstance(data, dict):
             return Reply(ReplyType.TEXT, str(data))
 
+        # 全空响应：服务明确表示无需回复
         reply_type = (data.get("reply_type") or data.get("type") or "").lower().strip()
+        has_content = any([
+            data.get("reply"), data.get("content"), data.get("message"),
+            data.get("image_url"), data.get("image_urls"), data.get("url"),
+            data.get("gif_url"), data.get("title"), data.get("desc"),
+            data.get("link_card"),
+        ])
+        if not has_content:
+            logger.info("[Webhook] 服务返回全空，跳过回复")
+            return Reply(ReplyType.TEXT, None)
         image_urls = self._collect_image_urls(data)
 
         # 文本 + 多图：先发文字，再发图片

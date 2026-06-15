@@ -345,6 +345,9 @@ class WeworkChannel(ChatChannel):
         if context and context.get("silence_mode"):
             logger.info("[WX][静默模式] 群 {} 静默期内，已调用服务但不发送回复".format(context.get("receiver")))
             return
+        if reply and reply.type == ReplyType.TEXT and reply.content is None:
+            logger.info("[WX] 服务返回全空，跳过发送")
+            return
         logger.debug(f"context: {context}")
         receiver = context["receiver"]
         actual_user_id = context["msg"].actual_user_id
