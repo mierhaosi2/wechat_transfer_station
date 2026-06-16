@@ -286,10 +286,15 @@ class WeworkChannel(ChatChannel):
 
         if is_internal_user:
             # 内部用户发言：更新静默计时器，转发给服务（用于会话记录），但不发回复
+            # 例外：@ 了机器人，正常回复
             _internal_user_last_msg_time[group_id] = time.time()
-            logger.info("[WX][群消息] 内部用户 {} 发言，群 {} 进入 {}s 静默，消息将转发服务".format(
-                cmsg.actual_user_nickname, group_id, silence_seconds))
-            silence_mode = True
+            if cmsg.is_at:
+                logger.info("[WX][群消息] 内部用户 {} @ 了机器人，忽略静默，正常回复".format(cmsg.actual_user_nickname))
+                silence_mode = False
+            else:
+                logger.info("[WX][群消息] 内部用户 {} 发言，群 {} 进入 {}s 静默，消息将转发服务".format(
+                    cmsg.actual_user_nickname, group_id, silence_seconds))
+                silence_mode = True
         else:
             # 外部用户发言：检查该群是否在静默期（静默期内仍转发给服务，但不发回复）
             # 例外：@ 了机器人，无论静默与否都正常回复
@@ -317,14 +322,22 @@ class WeworkChannel(ChatChannel):
         elif cmsg.ctype == ContextType.IMAGE:
             logger.debug("[WX]receive image for group msg: {}".format(cmsg.content))
         elif cmsg.ctype == ContextType.JOIN_GROUP:
-            welcome_msg = conf().get("group_welcome_msg", "")
             nickname = cmsg.actual_user_nickname or "新成员"
             group_id = cmsg.other_user_id
+            owner_id = getattr(cmsg, 'group_owner_id', '')
+            owner_name = getattr(cmsg, 'group_owner_name', '')
+            logger.info(f"[WX][入群欢迎] 群={group_id} 新成员={nickname} 群主={owner_name}({owner_id})")
+            welcome_msg = conf().get("group_welcome_msg", "")
+            at_list = []
             if welcome_msg:
-                text = welcome_msg.replace("{nickname}", nickname)
+                # {owner} 替换为 @owner_name，并加入 at_list 实现真正的 @
+                if "{owner}" in welcome_msg and owner_id:
+                    text = welcome_msg.replace("{nickname}", nickname).replace("{owner}", f"@{owner_name}")
+                    at_list = [owner_id]
+                else:
+                    text = welcome_msg.replace("{nickname}", nickname).replace("{owner}", owner_name)
             else:
                 text = f"欢迎 {nickname} 加入群聊！😊"
-            logger.info(f"[WX][入群欢迎] 群={group_id} 新成员={nickname}")
             wework.send_text(group_id, text)
             return
         elif cmsg.ctype == ContextType.PATPAT:
@@ -345,7 +358,7 @@ class WeworkChannel(ChatChannel):
         if context and context.get("silence_mode"):
             logger.info("[WX][静默模式] 群 {} 静默期内，已调用服务但不发送回复".format(context.get("receiver")))
             return
-        if reply and reply.type == ReplyType.TEXT and reply.content is None:
+        if reply and reply.type == ReplyType.TEXT and not reply.content:
             logger.info("[WX] 服务返回全空，跳过发送")
             return
         logger.debug(f"context: {context}")

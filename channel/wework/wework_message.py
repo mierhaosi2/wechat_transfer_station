@@ -151,21 +151,31 @@ class WeworkMessage(ChatMessage):
                 self.actual_user_nickname = member_list[0]['name']
                 self.actual_user_id = member_list[0]['user_id']
                 self.content = f"{self.actual_user_nickname}加入了群聊！"
+                self.group_owner_id = ""
+                self.group_owner_name = ""
                 directory = os.path.join(os.getcwd(), "tmp")
                 rooms = get_with_retry(wework.get_rooms)
                 if not rooms:
                     logger.error("更新群信息失败···")
                 else:
+                    join_group_id = wework_msg['data'].get('conversation_id') or wework_msg['data'].get('room_conversation_id', '')
                     result = {}
                     for room in rooms['room_list']:
-                        # 获取聊天室ID
                         room_wxid = room['conversation_id']
-
-                        # 获取聊天室成员
                         room_members = wework.get_room_members(room_wxid)
-
-                        # 将聊天室成员保存到结果字典中
                         result[room_wxid] = room_members
+
+                        # 顺便提取群主信息
+                        if room_wxid == join_group_id:
+                            creator_id = room.get('create_user_id', '')
+                            self.group_owner_id = creator_id
+                            if room_members and 'member_list' in room_members:
+                                for m in room_members['member_list']:
+                                    if m.get('user_id') == creator_id:
+                                        self.group_owner_name = m.get('room_nickname') or m.get('username', '')
+                                        break
+                            logger.info(f"[WX][入群] 群主 id={self.group_owner_id} name={self.group_owner_name}")
+
                     with open(os.path.join(directory, 'wework_room_members.json'), 'w', encoding='utf-8') as f:
                         json.dump(result, f, ensure_ascii=False, indent=4)
                     logger.info("有新成员加入，已自动更新群成员列表缓存！")

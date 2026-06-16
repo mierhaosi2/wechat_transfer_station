@@ -63,6 +63,7 @@ class WebhookBot(Bot):
 
         msg = context.get("msg")
         payload = {
+            "event_type": "message",
             "msg_id": msg.msg_id if msg else "",
             "query": query,
             "session_id": context.get("session_id", ""),
@@ -70,11 +71,14 @@ class WebhookBot(Bot):
             "sender_id": msg.actual_user_id if msg else "",
             "sender_name": msg.actual_user_nickname if msg else "",
             "is_internal_user": context.get("is_internal_user", False),
+            "is_at": msg.is_at if msg else False,
             "silence_mode": context.get("silence_mode", False),
         }
         if msg and msg.is_group and msg.other_user_id:
             payload["group_id"] = msg.other_user_id
             payload["group_name"] = msg.other_user_nickname or ""
+            payload["group_owner_id"] = context.get("group_owner_id", "")
+            payload["group_owner_name"] = context.get("group_owner_name", "")
 
         timeout = conf().get("msg_webhook_timeout", 10)
         logger.info(f"[Webhook] POST {webhook_url} payload={payload}")
