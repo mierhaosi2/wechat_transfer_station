@@ -309,12 +309,20 @@ class WeworkChannel(ChatChannel):
                     remaining = int(silence_seconds - elapsed)
                     logger.info("[WX][群消息] 群 {} 静默中（还剩 {}s），消息将转发服务但不发送回复".format(group_id, remaining))
 
-        # 外部用户 @ 了他人（非机器人）：说明这条消息是发给真人的，不回复
+        # @ 了他人（非机器人）：说明这条消息是发给真人的，不回复
+        # 检查 at_list 字段（普通消息）
         raw_at_list = cmsg._rawmsg.get('data', {}).get('at_list', [])
         if raw_at_list and not cmsg.is_at:
             at_names = [a.get('nickname', '') for a in raw_at_list]
-            logger.info("[WX][群消息] 外部用户 @ 了内部用户 {}，机器人不介入".format(at_names))
+            logger.info("[WX][群消息] @ 了他人 {}，机器人不介入".format(at_names))
             return
+        # 检查文本内容中的 @（引用消息的 @mention 不在 at_list 里，只在文本中）
+        if not cmsg.is_at and cmsg.ctype == ContextType.TEXT:
+            import re as _re
+            at_in_content = _re.findall(r'@(\S+?)[\u2005\u0020]', cmsg.content or '')
+            if at_in_content:
+                logger.info("[WX][群消息] 内容中检测到 @{} （非机器人），机器人不介入".format(at_in_content))
+                return
         if cmsg.ctype == ContextType.VOICE:
             if not conf().get("speech_recognition"):
                 return
