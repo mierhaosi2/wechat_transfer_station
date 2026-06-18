@@ -359,6 +359,7 @@ class WeworkChannel(ChatChannel):
             if silence_mode:
                 context["silence_mode"] = True
             context["is_internal_user"] = is_internal_user
+            context["is_at"] = cmsg.is_at
             self.produce(context)
 
     # 统一的发送函数，每个Channel自行实现，根据reply的type字段发送不同类型的消息
@@ -366,6 +367,16 @@ class WeworkChannel(ChatChannel):
         if context and context.get("silence_mode"):
             logger.info("[WX][静默模式] 群 {} 静默期内，已调用服务但不发送回复".format(context.get("receiver")))
             return
+        # 实时检查：处理期间如果客服插话导致进入静默，也不发送
+        if context and context.get("isgroup"):
+            group_id = context.get("receiver")
+            silence_seconds = conf().get("wework_internal_user_silence_seconds", 180)
+            last_internal_time = _internal_user_last_msg_time.get(group_id, 0)
+            elapsed = time.time() - last_internal_time
+            if elapsed < silence_seconds and not context.get("is_at"):
+                logger.info("[WX][静默模式] 群 {} 处理期间客服发言，取消发送（还剩 {}s）".format(
+                    group_id, int(silence_seconds - elapsed)))
+                return
         if reply and reply.type == ReplyType.TEXT and not reply.content:
             logger.info("[WX] 服务返回全空，跳过发送")
             return

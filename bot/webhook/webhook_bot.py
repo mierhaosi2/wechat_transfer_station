@@ -80,7 +80,7 @@ class WebhookBot(Bot):
             payload["group_owner_id"] = context.get("group_owner_id", "")
             payload["group_owner_name"] = context.get("group_owner_name", "")
 
-        timeout = conf().get("msg_webhook_timeout", 10)
+        timeout = conf().get("msg_webhook_timeout") or None
         logger.info(f"[Webhook] POST {webhook_url} payload={payload}")
 
         try:
