@@ -24,6 +24,10 @@ from PIL import Image
 
 # 记录每个群最近一次内部用户发言的时间戳 {group_id: timestamp}
 _internal_user_last_msg_time: dict = {}
+# 缓存每个群的群主信息 {group_id: (owner_id, owner_name)}
+_group_owner_cache: dict = {}
+# 记录每个群最近一次 at_manager 的时间戳 {group_id: timestamp}
+_at_manager_last_time: dict = {}
 
 def get_wxid_by_name(room_members, group_wxid, name):
     if group_wxid in room_members:
@@ -284,6 +288,7 @@ class WeworkChannel(ChatChannel):
         group_id = cmsg.other_user_id
         silence_seconds = conf().get("wework_internal_user_silence_seconds", 180)
 
+        silence_reason = ""
         if is_internal_user:
             # 内部用户发言：更新静默计时器，转发给服务（用于会话记录），但不发回复
             # 例外：@ 了机器人，正常回复
@@ -295,6 +300,7 @@ class WeworkChannel(ChatChannel):
                 logger.info("[WX][群消息] 内部用户 {} 发言，群 {} 进入 {}s 静默，消息将转发服务".format(
                     cmsg.actual_user_nickname, group_id, silence_seconds))
                 silence_mode = True
+                silence_reason = "internal_user"
         else:
             # 外部用户发言：检查该群是否在静默期（静默期内仍转发给服务，但不发回复）
             # 例外：@ 了机器人，无论静默与否都正常回复
@@ -307,22 +313,24 @@ class WeworkChannel(ChatChannel):
                 silence_mode = elapsed < silence_seconds
                 if silence_mode:
                     remaining = int(silence_seconds - elapsed)
+                    silence_reason = "internal_user"
                     logger.info("[WX][群消息] 群 {} 静默中（还剩 {}s），消息将转发服务但不发送回复".format(group_id, remaining))
 
-        # @ 了他人（非机器人）：说明这条消息是发给真人的，不回复
-        # 检查 at_list 字段（普通消息）
-        raw_at_list = cmsg._rawmsg.get('data', {}).get('at_list', [])
-        if raw_at_list and not cmsg.is_at:
-            at_names = [a.get('nickname', '') for a in raw_at_list]
-            logger.info("[WX][群消息] @ 了他人 {}，机器人不介入".format(at_names))
-            return
-        # 检查文本内容中的 @（引用消息的 @mention 不在 at_list 里，只在文本中）
-        if not cmsg.is_at and cmsg.ctype == ContextType.TEXT:
-            import re as _re
-            at_in_content = _re.findall(r'@(\S+?)[\u2005\u0020]', cmsg.content or '')
-            if at_in_content:
-                logger.info("[WX][群消息] 内容中检测到 @{} （非机器人），机器人不介入".format(at_in_content))
-                return
+        # 消息中含有 @：只要不是 @ 机器人，一律转发服务但不回复
+        if not cmsg.is_at:
+            raw_at_list = cmsg._rawmsg.get('data', {}).get('at_list', [])
+            at_in_content = []
+            if cmsg.ctype == ContextType.TEXT:
+                import re as _re
+                # 去掉引用头中的发送者名字（「名字：→「），避免名字里的 @ 被误判为提及
+                check_content = _re.sub(r'「[^：」]*：', '「', cmsg.content or '')
+                # 匹配 @ 提及：排除邮箱（@ 前有字母/数字/点，或 @ 后跟域名格式如 xxx.com）
+                at_in_content = _re.findall(r'(?<![A-Za-z0-9.])@(?!\S+\.[A-Za-z]{2,})(\S+?)(?=[\u2005\u0020\uff09\u300b\u3011\u300d\u300f\uff1a\uff0c\uff01\uff1f。，！？」』】\s]|$)', check_content)
+            if raw_at_list or at_in_content:
+                at_names = [a.get('nickname', '') for a in raw_at_list] or at_in_content
+                logger.info("[WX][群消息] 含有 @ {}，转发服务但不回复".format(at_names))
+                silence_mode = True
+                silence_reason = "at_others"
         if cmsg.ctype == ContextType.VOICE:
             if not conf().get("speech_recognition"):
                 return
@@ -334,6 +342,8 @@ class WeworkChannel(ChatChannel):
             group_id = cmsg.other_user_id
             owner_id = getattr(cmsg, 'group_owner_id', '')
             owner_name = getattr(cmsg, 'group_owner_name', '')
+            if owner_id:
+                _group_owner_cache[group_id] = (owner_id, owner_name)
             logger.info(f"[WX][入群欢迎] 群={group_id} 新成员={nickname} 群主={owner_name}({owner_id})")
             welcome_msg = conf().get("group_welcome_msg", "")
             at_list = []
@@ -358,14 +368,22 @@ class WeworkChannel(ChatChannel):
         if context:
             if silence_mode:
                 context["silence_mode"] = True
+                context["silence_reason"] = silence_reason
             context["is_internal_user"] = is_internal_user
             context["is_at"] = cmsg.is_at
+            owner_id, owner_name = _group_owner_cache.get(group_id, ("", ""))
+            context["group_owner_id"] = owner_id
+            context["group_owner_name"] = owner_name
             self.produce(context)
 
     # 统一的发送函数，每个Channel自行实现，根据reply的type字段发送不同类型的消息
     def send(self, reply: Reply, context: Context):
         if context and context.get("silence_mode"):
-            logger.info("[WX][静默模式] 群 {} 静默期内，已调用服务但不发送回复".format(context.get("receiver")))
+            reason = context.get("silence_reason", "")
+            if reason == "at_others":
+                logger.info("[WX][不回复] 群 {} 消息含 @ 他人，已调用服务但不发送回复".format(context.get("receiver")))
+            else:
+                logger.info("[WX][不回复] 群 {} 静默期内（客服发言），已调用服务但不发送回复".format(context.get("receiver")))
             return
         # 实时检查：处理期间如果客服插话导致进入静默，也不发送
         if context and context.get("isgroup"):
@@ -383,8 +401,51 @@ class WeworkChannel(ChatChannel):
         logger.debug(f"context: {context}")
         receiver = context["receiver"]
         actual_user_id = context["msg"].actual_user_id
+
+        # at_manager：先发 @ 群主通知，再发主回复（每个群每小时最多一次）
+        if getattr(reply, 'at_manager', False) and context and context.get("isgroup"):
+            _last_at = _at_manager_last_time.get(receiver, 0)
+            if time.time() - _last_at < 3600:
+                logger.info("[WX][at_manager] 群 {} 冷却中（距上次 {:.0f}s），跳过本次 @".format(
+                    receiver, time.time() - _last_at))
+            else:
+                owner_id = context.get("group_owner_id", "")
+                owner_name = context.get("group_owner_name", "")
+                if not owner_id:
+                    try:
+                        rooms = wework.get_rooms()
+                        if rooms:
+                            for room in rooms.get('room_list', []):
+                                if room.get('conversation_id') == receiver:
+                                    owner_id = room.get('create_user_id', '')
+                                    if owner_id:
+                                        members = wework.get_room_members(receiver)
+                                        if members:
+                                            for m in members.get('member_list', []):
+                                                if m.get('user_id') == owner_id:
+                                                    owner_name = m.get('room_nickname') or m.get('username', '')
+                                                    break
+                                        _group_owner_cache[receiver] = (owner_id, owner_name)
+                                        logger.info("[WX][at_manager] 实时查询群主 {}({})".format(owner_name, owner_id))
+                                    break
+                    except Exception as e:
+                        logger.error("[WX][at_manager] 查询群主失败: {}".format(e))
+                if owner_id:
+                    raw_answer = getattr(reply, 'answer', '') or ''
+                    clean_answer = re.sub(r'^@\S+\s*', '', raw_answer).strip()
+                    at_text = clean_answer if clean_answer else "有客户需要您跟进 👆"
+                    wework.send_room_at_msg(receiver, f" {at_text}", [owner_id])
+                    _at_manager_last_time[receiver] = time.time()
+                    logger.info("[WX][at_manager] @ 群主 {}({})，群={}".format(owner_name, owner_id, receiver))
+                else:
+                    logger.warning("[WX][at_manager] 查询群主失败，群={}".format(receiver))
+
+        # 群消息回复时在开头 @ 发问的人
+        sender_name = context["msg"].actual_user_nickname if context.get("isgroup") else ""
         if reply.type == ReplyType.TEXT or reply.type == ReplyType.TEXT_:
             content = re.sub(r"^@(.*?)\n", "", reply.content)
+            if sender_name and context.get("isgroup"):
+                content = f"@{sender_name} {content}"
             wework.send_text(receiver, content)
             logger.info("[WX] sendMsg={}, receiver={}".format(reply, receiver))
         elif reply.type == ReplyType.ERROR or reply.type == ReplyType.INFO:
@@ -418,11 +479,13 @@ class WeworkChannel(ChatChannel):
             card = reply.content if isinstance(reply.content, dict) else {}
             title = card.get("title") or card.get("url") or "链接"
             desc = card.get("desc") or ""
+            text_desc = card.get("text_desc") or ""
             url = card.get("url")
             image_url = card.get("image_url") or ""
             if not url:
                 wework.send_text(receiver, "链接卡片缺少 url")
             else:
+                wework.send_text(receiver, text_desc)
                 wework.send_link_card(receiver, title, desc, url, image_url)
                 logger.info("[WX] sendLinkCard title={}, url={}, receiver={}".format(title, url, receiver))
         elif reply.type == ReplyType.GIF_URL:
@@ -462,3 +525,4 @@ class WeworkChannel(ChatChannel):
             reply.content = os.path.join(current_dir, "tmp", voice_file)
             wework.send_file(receiver, reply.content)
             logger.info("[WX] sendFile={}, receiver={}".format(reply.content, receiver))
+

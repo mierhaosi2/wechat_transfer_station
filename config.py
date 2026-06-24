@@ -8,11 +8,6 @@ import pickle
 from common.log import logger
 
 available_setting = {
-    # dify配置
-    "dify_api_base": "https://api.dify.ai/v1",
-    "dify_api_key": "app-xxx",
-    "dify_app_type": "chatbot",  # chatbot / agent / workflow
-    "dify_convsersation_max_messages": 5,
 
     # Bot触发配置
     "model": "dify",

@@ -62,10 +62,14 @@ class WebhookBot(Bot):
             return Reply(ReplyType.ERROR, "[WebhookBot] msg_webhook_url 未配置")
 
         msg = context.get("msg")
+        # @ 机器人时去掉开头的 @名字，只取实际问题内容
+        import re as _re
+        is_at = msg.is_at if msg else False
+        clean_query = _re.sub(r'^@\S+[\u2005\u0020]+', '', query or '').strip() if is_at else (query or '')
         payload = {
             "event_type": "message",
             "msg_id": msg.msg_id if msg else "",
-            "query": query,
+            "query": clean_query,
             "session_id": context.get("session_id", ""),
             "is_group": msg.is_group if msg else False,
             "sender_id": msg.actual_user_id if msg else "",
@@ -73,6 +77,7 @@ class WebhookBot(Bot):
             "is_internal_user": context.get("is_internal_user", False),
             "is_at": msg.is_at if msg else False,
             "silence_mode": context.get("silence_mode", False),
+            "silence_reason": context.get("silence_reason", ""),
         }
         if msg and msg.is_group and msg.other_user_id:
             payload["group_id"] = msg.other_user_id
@@ -88,8 +93,11 @@ class WebhookBot(Bot):
             resp.raise_for_status()
 
             data = resp.json()
+            logger.info(f"[Webhook] 原始响应: {data}")
             reply = self._parse_response(data)
-            logger.info(f"[Webhook] 回复: type={reply.type}, content={reply.content}")
+            reply.at_manager = bool(data.get("at_manager", False))
+            reply.answer = data.get("answer", "")
+            logger.info(f"[Webhook] 回复: type={reply.type}, content={reply.content}, at_manager={reply.at_manager}, answer={reply.answer}")
             return reply
 
         except requests.Timeout:
@@ -140,6 +148,8 @@ class WebhookBot(Bot):
                     "desc": card.get("desc") or data.get("description") or data.get("desc") or "",
                     "url": url,
                     "image_url": card.get("image_url") or data.get("image_url") or "",
+                    "text_desc": card.get("text_desc") or data.get("text_desc") or "",
+                    "answer":card.get("answer") or data.get("answer") or "",
                 },
             )
 
@@ -152,6 +162,8 @@ class WebhookBot(Bot):
                     "desc": data.get("desc") or data.get("description") or "",
                     "url": data["url"],
                     "image_url": data.get("image_url") or "",
+                    "text_desc": data.get("text_desc") or "",
+                    "answer":card.get("answer") or data.get("answer") or "",
                 },
             )
 
