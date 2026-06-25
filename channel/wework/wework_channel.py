@@ -322,8 +322,11 @@ class WeworkChannel(ChatChannel):
             at_in_content = []
             if cmsg.ctype == ContextType.TEXT:
                 import re as _re
-                # 去掉引用头中的发送者名字（「名字：→「），避免名字里的 @ 被误判为提及
+                # 去掉引用头中的发送者名字，避免名字里的 @ 被误判为提及
+                # 处理 「名字：」格式
                 check_content = _re.sub(r'「[^：」]*：', '「', cmsg.content or '')
+                # 处理 "名字：\n内容"\n------格式（双引号引用）
+                check_content = _re.sub(r'"[^：\n"]*：', '"', check_content)
                 # 匹配 @ 提及：排除邮箱（@ 前有字母/数字/点，或 @ 后跟域名格式如 xxx.com）
                 at_in_content = _re.findall(r'(?<![A-Za-z0-9.])@(?!\S+\.[A-Za-z]{2,})(\S+?)(?=[\u2005\u0020\uff09\u300b\u3011\u300d\u300f\uff1a\uff0c\uff01\uff1f。，！？」』】\s]|$)', check_content)
             if raw_at_list or at_in_content:
@@ -402,44 +405,6 @@ class WeworkChannel(ChatChannel):
         receiver = context["receiver"]
         actual_user_id = context["msg"].actual_user_id
 
-        # at_manager：先发 @ 群主通知，再发主回复（每个群每小时最多一次）
-        if getattr(reply, 'at_manager', False) and context and context.get("isgroup"):
-            _last_at = _at_manager_last_time.get(receiver, 0)
-            if time.time() - _last_at < 3600:
-                logger.info("[WX][at_manager] 群 {} 冷却中（距上次 {:.0f}s），跳过本次 @".format(
-                    receiver, time.time() - _last_at))
-            else:
-                owner_id = context.get("group_owner_id", "")
-                owner_name = context.get("group_owner_name", "")
-                if not owner_id:
-                    try:
-                        rooms = wework.get_rooms()
-                        if rooms:
-                            for room in rooms.get('room_list', []):
-                                if room.get('conversation_id') == receiver:
-                                    owner_id = room.get('create_user_id', '')
-                                    if owner_id:
-                                        members = wework.get_room_members(receiver)
-                                        if members:
-                                            for m in members.get('member_list', []):
-                                                if m.get('user_id') == owner_id:
-                                                    owner_name = m.get('room_nickname') or m.get('username', '')
-                                                    break
-                                        _group_owner_cache[receiver] = (owner_id, owner_name)
-                                        logger.info("[WX][at_manager] 实时查询群主 {}({})".format(owner_name, owner_id))
-                                    break
-                    except Exception as e:
-                        logger.error("[WX][at_manager] 查询群主失败: {}".format(e))
-                if owner_id:
-                    raw_answer = getattr(reply, 'answer', '') or ''
-                    clean_answer = re.sub(r'^@\S+\s*', '', raw_answer).strip()
-                    at_text = clean_answer if clean_answer else "有客户需要您跟进 👆"
-                    wework.send_room_at_msg(receiver, f" {at_text}", [owner_id])
-                    _at_manager_last_time[receiver] = time.time()
-                    logger.info("[WX][at_manager] @ 群主 {}({})，群={}".format(owner_name, owner_id, receiver))
-                else:
-                    logger.warning("[WX][at_manager] 查询群主失败，群={}".format(receiver))
-
         # 群消息回复时在开头 @ 发问的人
         sender_name = context["msg"].actual_user_nickname if context.get("isgroup") else ""
         if reply.type == ReplyType.TEXT or reply.type == ReplyType.TEXT_:
@@ -486,6 +451,7 @@ class WeworkChannel(ChatChannel):
                 wework.send_text(receiver, "链接卡片缺少 url")
             else:
                 wework.send_text(receiver, text_desc)
+                time.sleep(1)
                 wework.send_link_card(receiver, title, desc, url, image_url)
                 logger.info("[WX] sendLinkCard title={}, url={}, receiver={}".format(title, url, receiver))
         elif reply.type == ReplyType.GIF_URL:
@@ -525,4 +491,42 @@ class WeworkChannel(ChatChannel):
             reply.content = os.path.join(current_dir, "tmp", voice_file)
             wework.send_file(receiver, reply.content)
             logger.info("[WX] sendFile={}, receiver={}".format(reply.content, receiver))
+
+        # at_manager：发完主回复后 @ 群主提醒跟进（每个群每小时最多一次）
+        if getattr(reply, 'at_manager', False) and context and context.get("isgroup"):
+            _last_at = _at_manager_last_time.get(receiver, 0)
+            if time.time() - _last_at < 3600:
+                logger.info("[WX][at_manager] 群 {} 冷却中（距上次 {:.0f}s），跳过本次 @".format(
+                    receiver, time.time() - _last_at))
+            else:
+                owner_id = context.get("group_owner_id", "")
+                owner_name = context.get("group_owner_name", "")
+                if not owner_id:
+                    try:
+                        rooms = wework.get_rooms()
+                        if rooms:
+                            for room in rooms.get('room_list', []):
+                                if room.get('conversation_id') == receiver:
+                                    owner_id = room.get('create_user_id', '')
+                                    if owner_id:
+                                        members = wework.get_room_members(receiver)
+                                        if members:
+                                            for m in members.get('member_list', []):
+                                                if m.get('user_id') == owner_id:
+                                                    owner_name = m.get('room_nickname') or m.get('username', '')
+                                                    break
+                                        _group_owner_cache[receiver] = (owner_id, owner_name)
+                                        logger.info("[WX][at_manager] 实时查询群主 {}({})".format(owner_name, owner_id))
+                                    break
+                    except Exception as e:
+                        logger.error("[WX][at_manager] 查询群主失败: {}".format(e))
+                if owner_id:
+                    raw_answer = getattr(reply, 'answer', '') or ''
+                    clean_answer = re.sub(r'^@\S+\s*', '', raw_answer).strip()
+                    at_text = clean_answer if clean_answer else "有客户需要您跟进 👆"
+                    wework.send_room_at_msg(receiver, f" {at_text}", [owner_id])
+                    _at_manager_last_time[receiver] = time.time()
+                    logger.info("[WX][at_manager] @ 群主 {}({})，群={}".format(owner_name, owner_id, receiver))
+                else:
+                    logger.warning("[WX][at_manager] 查询群主失败，群={}".format(receiver))
 

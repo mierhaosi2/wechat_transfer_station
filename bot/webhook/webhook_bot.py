@@ -65,7 +65,7 @@ class WebhookBot(Bot):
         # @ 机器人时去掉开头的 @名字，只取实际问题内容
         import re as _re
         is_at = msg.is_at if msg else False
-        clean_query = _re.sub(r'^@\S+[\u2005\u0020]+', '', query or '').strip() if is_at else (query or '')
+        clean_query = _re.sub(r'@\S+[\u2005\u0020]*', '', query or '').strip() if is_at else (query or '')
         payload = {
             "event_type": "message",
             "msg_id": msg.msg_id if msg else "",
