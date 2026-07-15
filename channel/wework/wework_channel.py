@@ -193,7 +193,12 @@ class WeworkChannel(ChatChannel):
         login_info = wework.get_login_info()
         self.user_id = login_info['user_id']
         self.name = login_info['nickname']
-        logger.info(f"登录信息:>>>user_id:{self.user_id}>>>>>>>>name:{self.name}")
+        corp_id = login_info.get('corp_id', '') or login_info.get('corpId', '') or login_info.get('corpid', '')
+        if corp_id and not conf().get("wechatcom_corp_id"):
+            conf()["wechatcom_corp_id"] = corp_id
+            logger.info(f"登录信息:>>>user_id:{self.user_id}>>>>>>>>name:{self.name}>>>>corp_id:{corp_id}")
+        else:
+            logger.info(f"登录信息:>>>user_id:{self.user_id}>>>>>>>>name:{self.name}")
         logger.info("静默延迟60s，等待客户端刷新数据，请勿进行任何操作······")
         time.sleep(60)
         contacts = get_with_retry(wework.get_external_contacts)

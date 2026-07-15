@@ -78,6 +78,7 @@ class WebhookBot(Bot):
             "is_at": msg.is_at if msg else False,
             "silence_mode": context.get("silence_mode", False),
             "silence_reason": context.get("silence_reason", ""),
+            "corp_id": conf().get("wechatcom_corp_id", ""),
         }
         if msg and msg.is_group and msg.other_user_id:
             payload["group_id"] = msg.other_user_id
