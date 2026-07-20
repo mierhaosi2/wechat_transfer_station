@@ -3,6 +3,7 @@
   "model": "webhook",
   "msg_webhook_url": "http://your-service/api/callback",
   "msg_webhook_timeout": 60,
+  "msg_push_url": "http://127.0.0.1:9899/push/text",
   "single_chat_prefix": [""],
   "single_chat_reply_prefix": "",
   "group_chat_prefix": [""],

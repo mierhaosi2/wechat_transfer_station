@@ -76,6 +76,7 @@ class WebhookBot(Bot):
             "sender_name": msg.actual_user_nickname if msg else "",
             "is_internal_user": context.get("is_internal_user", False),
             "is_at": msg.is_at if msg else False,
+            "is_group_owner": bool(context.get("is_group_owner", False)),
             "silence_mode": context.get("silence_mode", False),
             "silence_reason": context.get("silence_reason", ""),
             "corp_id": conf().get("wechatcom_corp_id", ""),

@@ -95,6 +95,16 @@ available_setting = {
     # 消息回调 webhook（收到消息时主动调用外部接口）
     "msg_webhook_url": "",       # 外部接口地址，为空则不启用
     "msg_webhook_timeout": 5,    # 请求超时秒数
+
+    # 主动推送发送接口（本服务监听，供外部服务调用；为空则不启用）
+    "msg_push_url": "",
+
+    # ntwork 绑定的企微版本（关于页版本）；不配则默认 4.0.8.6027
+    "wework_version": "4.0.8.6027",
+    "wework_exe_path": "",
+
+    # 群聊中视为群主的发送人 user_id 白名单（命中后 is_group_owner=true）
+    "wework_group_owner_whitelist": [],
 }
 
 

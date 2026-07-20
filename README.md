@@ -68,9 +68,20 @@ python app.py
   "is_group": false,
   "sender_id": "发送人ID",
   "sender_name": "发送人昵称",
+  "is_group_owner": false,
   "group_id": "群ID（群聊时）",
-  "group_name": "群名（群聊时）"
+  "group_name": "群名（群聊时）",
+  "group_owner_id": "群主ID（群聊时）",
+  "group_owner_name": "群主昵称（群聊时）"
 }
+```
+
+群聊时若发送人是群主，`is_group_owner` 为 `true`（供外部服务识别群主指令，如关闭开场白、关闭自动回复改为 @ 才回复等）。
+
+也可在 `config.json` 配置白名单，名单内 user_id 固定视为群主：
+
+```json
+"wework_group_owner_whitelist": ["7881299895970606"]
 ```
 
 ### 响应（JSON）
@@ -121,6 +132,73 @@ python app.py
 ```
 
 `image_urls` 最多发送 `max_media_send_count` 张（默认 3），每条间隔 `media_send_interval` 秒（默认 1）。也可只传 `image_urls` 不发文字。
+
+---
+
+## 主动推送（单聊纯文本）
+
+与 `msg_webhook_url` 类似，在 `config.json` 里配一个完整 URL 即可。区别是：webhook 是本服务去调外部；`msg_push_url` 是本服务对外开放的推送地址（供 Dify 来调）。
+
+```json
+"msg_push_url": "http://127.0.0.1:9899/push/text"
+```
+
+上域名后可不写端口，例如：
+
+```json
+"msg_push_url": "https://aiapi.example.com/flp-fai-api/v1/wechat/bot-push"
+```
+
+为空则不启用。URL 未带端口时，本进程默认监听 `9899`，由 Nginx 等把域名反代进来即可。
+
+### 请求
+
+单条：
+
+```http
+POST http://本机IP:9899/push/text
+Content-Type: application/json
+
+{
+  "receiver_name": "张三",
+  "content": "要推送的文本"
+}
+```
+
+批量（`messages` 数组，也支持顶层直接传数组）：
+
+```json
+{
+  "messages": [
+    {"receiver_name": "张三", "content": "第一条"},
+    {"receiver_name": "李四", "content": "第二条"}
+  ]
+}
+```
+
+按外部联系人、内部联系人、群成员缓存查找，字段顺序：`备注 → 昵称 → username → realname → 群昵称 → acctid`；命中唯一一人则发送。
+
+### 响应
+
+单条成功：
+
+```json
+{"ok": true, "receiver": "S:xxxxx"}
+```
+
+批量（全部成功 `ok=true`；有失败时 HTTP 207，`ok=false`，见 `results`）：
+
+```json
+{
+  "ok": true,
+  "success": 2,
+  "failed": 0,
+  "results": [
+    {"ok": true, "receiver_name": "张三", "receiver": "S:xxxxx"},
+    {"ok": true, "receiver_name": "李四", "receiver": "S:yyyyy"}
+  ]
+}
+```
 
 ---
 

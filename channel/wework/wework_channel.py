@@ -20,6 +20,7 @@ from common.utils import compress_imgfile, fsize
 from config import conf
 from channel.wework.run import wework
 from channel.wework import run
+from channel.wework.push_api import start_push_api
 from PIL import Image
 
 # 记录每个群最近一次内部用户发言的时间戳 {group_id: timestamp}
@@ -35,6 +36,36 @@ def get_wxid_by_name(room_members, group_wxid, name):
             if member['room_nickname'] == name or member['username'] == name:
                 return member['user_id']
     return None  # 如果没有找到对应的group_wxid或name，则返回None
+
+
+def resolve_group_owner(group_id: str):
+    """解析群主 (owner_id, owner_name)，优先缓存，必要时实时查群列表。"""
+    if not group_id:
+        return "", ""
+    cached = _group_owner_cache.get(group_id)
+    if cached and cached[0]:
+        return cached
+    try:
+        rooms = wework.get_rooms()
+        if rooms:
+            for room in rooms.get("room_list", []):
+                if room.get("conversation_id") != group_id:
+                    continue
+                owner_id = room.get("create_user_id", "") or ""
+                owner_name = ""
+                if owner_id:
+                    members = wework.get_room_members(group_id)
+                    if members:
+                        for m in members.get("member_list", []):
+                            if m.get("user_id") == owner_id:
+                                owner_name = m.get("room_nickname") or m.get("username", "") or ""
+                                break
+                    _group_owner_cache[group_id] = (owner_id, owner_name)
+                    return owner_id, owner_name
+                break
+    except Exception as e:
+        logger.error("[WX] 查询群主失败 group={} err={}".format(group_id, e))
+    return "", ""
 
 
 def download_and_compress_image(url, filename, quality=30):
@@ -233,6 +264,7 @@ class WeworkChannel(ChatChannel):
         with open(os.path.join(directory, 'wework_room_members.json'), 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=4)
         logger.info("wework程序初始化完成········")
+        start_push_api()
         run.forever()
 
     @time_checker
@@ -379,9 +411,22 @@ class WeworkChannel(ChatChannel):
                 context["silence_reason"] = silence_reason
             context["is_internal_user"] = is_internal_user
             context["is_at"] = cmsg.is_at
-            owner_id, owner_name = _group_owner_cache.get(group_id, ("", ""))
+            owner_id, owner_name = resolve_group_owner(group_id)
             context["group_owner_id"] = owner_id
             context["group_owner_name"] = owner_name
+            sender_id = cmsg.actual_user_id or ""
+            owner_whitelist = conf().get("wework_group_owner_whitelist") or []
+            in_owner_whitelist = bool(sender_id and str(sender_id) in [str(x) for x in owner_whitelist])
+            is_group_owner = bool(
+                (owner_id and sender_id and sender_id == owner_id) or in_owner_whitelist
+            )
+            context["is_group_owner"] = is_group_owner
+            if is_group_owner:
+                if in_owner_whitelist and not (owner_id and sender_id == owner_id):
+                    logger.info("[WX][群消息] 发送人 {}({}) 命中群主白名单，is_group_owner=true".format(
+                        cmsg.actual_user_nickname, sender_id))
+                else:
+                    logger.info("[WX][群消息] 发送人为群主 {}({})".format(owner_name, owner_id))
             self.produce(context)
 
     # 统一的发送函数，每个Channel自行实现，根据reply的type字段发送不同类型的消息
@@ -507,24 +552,9 @@ class WeworkChannel(ChatChannel):
                 owner_id = context.get("group_owner_id", "")
                 owner_name = context.get("group_owner_name", "")
                 if not owner_id:
-                    try:
-                        rooms = wework.get_rooms()
-                        if rooms:
-                            for room in rooms.get('room_list', []):
-                                if room.get('conversation_id') == receiver:
-                                    owner_id = room.get('create_user_id', '')
-                                    if owner_id:
-                                        members = wework.get_room_members(receiver)
-                                        if members:
-                                            for m in members.get('member_list', []):
-                                                if m.get('user_id') == owner_id:
-                                                    owner_name = m.get('room_nickname') or m.get('username', '')
-                                                    break
-                                        _group_owner_cache[receiver] = (owner_id, owner_name)
-                                        logger.info("[WX][at_manager] 实时查询群主 {}({})".format(owner_name, owner_id))
-                                    break
-                    except Exception as e:
-                        logger.error("[WX][at_manager] 查询群主失败: {}".format(e))
+                    owner_id, owner_name = resolve_group_owner(receiver)
+                    if owner_id:
+                        logger.info("[WX][at_manager] 实时查询群主 {}({})".format(owner_name, owner_id))
                 if owner_id:
                     raw_answer = getattr(reply, 'answer', '') or ''
                     clean_answer = re.sub(r'^@\S+\s*', '', raw_answer).strip()
