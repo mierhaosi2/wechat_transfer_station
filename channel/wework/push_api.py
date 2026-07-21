@@ -162,13 +162,47 @@ def push_text_by_name(receiver_name: str, content: str):
     return True, None, conversation_id
 
 
+def _load_rooms() -> list:
+    """实时拉取群列表，失败则回退缓存。"""
+    rooms_path = os.path.join(_TMP_DIR, "wework_rooms.json")
+    try:
+        rooms = wework.get_rooms()
+        if rooms and isinstance(rooms.get("room_list"), list):
+            _write_json(rooms_path, rooms)
+            return rooms["room_list"]
+    except Exception as e:
+        logger.warning(f"[PushAPI] 获取群列表失败，回退缓存: {e}")
+    data = _read_json(rooms_path) or {}
+    return data.get("room_list") or []
+
+
+def find_rooms_by_name(group_name: str) -> list:
+    """按群名精确匹配，返回命中的群列表。"""
+    group_name = (group_name or "").strip()
+    if not group_name:
+        return []
+    return [r for r in _load_rooms() if (r.get("nickname") or "").strip() == group_name]
+
+
+def push_text_to_group(group_id: str, content: str):
+    """
+    向群发送文本。
+    返回 (ok: bool, error: str|None, receiver: str|None)
+    """
+    if not group_id or not group_id.startswith("R:"):
+        return False, "group_id 格式不正确（须以 R: 开头）", None
+    wework.send_text(group_id, content)
+    return True, None, group_id
+
+
 def _normalize_push_items(data) -> list:
     """
-    统一成 [{receiver_name, content}, ...]
-    支持：
+    统一成消息项列表，每项支持单聊或群聊：
     1) 单条: {"receiver_name":"张三","content":"..."}
-    2) 批量: {"messages":[{"receiver_name":"...","content":"..."}, ...]}
-    3) 顶层数组: [{"receiver_name":"...","content":"..."}, ...]
+               {"group_id":"R:xxx","content":"..."}
+               {"group_name":"群名","content":"..."}
+    2) 批量: {"messages":[...]}
+    3) 顶层数组: [...]
     """
     if isinstance(data, list):
         return data
@@ -182,22 +216,61 @@ def _normalize_push_items(data) -> list:
 def _push_one_item(item: dict) -> dict:
     if not isinstance(item, dict):
         return {"ok": False, "error": "消息项须为 JSON 对象"}
-    receiver_name = item.get("receiver_name") or item.get("name") or ""
+
     content = item.get("content") if item.get("content") is not None else item.get("reply")
-    if not str(receiver_name).strip():
-        return {"ok": False, "error": "缺少 receiver_name"}
     if content is None or str(content) == "":
-        return {"ok": False, "receiver_name": str(receiver_name), "error": "缺少 content"}
+        return {"ok": False, "error": "缺少 content"}
+
+    # 群聊：直接传 group_id
+    group_id = (item.get("group_id") or "").strip()
+    if group_id:
+        try:
+            ok, err, receiver = push_text_to_group(group_id, str(content))
+            if ok:
+                logger.info(f"[PushAPI] 群推送成功 group_id={group_id}")
+                return {"ok": True, "group_id": group_id, "receiver": receiver}
+            logger.warning(f"[PushAPI] 群推送失败 group_id={group_id} error={err}")
+            return {"ok": False, "group_id": group_id, "error": err}
+        except Exception as e:
+            logger.exception(f"[PushAPI] 群推送异常 group_id={group_id}: {e}")
+            return {"ok": False, "group_id": group_id, "error": str(e)}
+
+    # 群聊：按群名查找
+    group_name = (item.get("group_name") or "").strip()
+    if group_name:
+        try:
+            matched_rooms = find_rooms_by_name(group_name)
+            if not matched_rooms:
+                logger.warning(f"[PushAPI] 群推送失败 group_name={group_name} error=未找到群")
+                return {"ok": False, "group_name": group_name, "error": "未找到群"}
+            if len(matched_rooms) > 1:
+                logger.warning(f"[PushAPI] 群推送失败 group_name={group_name} error=匹配到多个群")
+                return {"ok": False, "group_name": group_name, "error": "匹配到多个群，请使用 group_id"}
+            gid = matched_rooms[0]["conversation_id"]
+            ok, err, receiver = push_text_to_group(gid, str(content))
+            if ok:
+                logger.info(f"[PushAPI] 群推送成功 group_name={group_name} group_id={gid}")
+                return {"ok": True, "group_name": group_name, "group_id": gid, "receiver": receiver}
+            logger.warning(f"[PushAPI] 群推送失败 group_name={group_name} error={err}")
+            return {"ok": False, "group_name": group_name, "error": err}
+        except Exception as e:
+            logger.exception(f"[PushAPI] 群推送异常 group_name={group_name}: {e}")
+            return {"ok": False, "group_name": group_name, "error": str(e)}
+
+    # 单聊：按名字查找
+    receiver_name = (item.get("receiver_name") or item.get("name") or "").strip()
+    if not receiver_name:
+        return {"ok": False, "error": "缺少 receiver_name / group_id / group_name"}
     try:
-        ok, err, receiver = push_text_by_name(str(receiver_name), str(content))
+        ok, err, receiver = push_text_by_name(receiver_name, str(content))
         if ok:
             logger.info(f"[PushAPI] 推送成功 receiver_name={receiver_name} receiver={receiver}")
-            return {"ok": True, "receiver_name": str(receiver_name), "receiver": receiver}
+            return {"ok": True, "receiver_name": receiver_name, "receiver": receiver}
         logger.warning(f"[PushAPI] 推送失败 receiver_name={receiver_name} error={err}")
-        return {"ok": False, "receiver_name": str(receiver_name), "error": err}
+        return {"ok": False, "receiver_name": receiver_name, "error": err}
     except Exception as e:
         logger.exception(f"[PushAPI] 推送异常 receiver_name={receiver_name}: {e}")
-        return {"ok": False, "receiver_name": str(receiver_name), "error": str(e)}
+        return {"ok": False, "receiver_name": receiver_name, "error": str(e)}
 
 
 class _PushHandler(BaseHTTPRequestHandler):
