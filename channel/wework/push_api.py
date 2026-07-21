@@ -1,10 +1,16 @@
 # encoding:utf-8
-"""主动推送文本消息 HTTP 接口（供外部服务调用）"""
+"""主动推送接口（供外部服务调用），支持文本/图片/链接卡片/多图等消息类型"""
 import json
 import os
+import re as _re
+import tempfile
 import threading
+import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+
+import requests as _requests
 
 from channel.wework.run import wework
 from common.log import logger
@@ -184,15 +190,227 @@ def find_rooms_by_name(group_name: str) -> list:
     return [r for r in _load_rooms() if (r.get("nickname") or "").strip() == group_name]
 
 
-def push_text_to_group(group_id: str, content: str):
+def _get_group_owner_id(group_id: str) -> str:
+    """从群列表缓存里查群主 user_id，找不到返回空字符串。"""
+    rooms_path = os.path.join(_TMP_DIR, "wework_rooms.json")
+    rooms_data = _read_json(rooms_path) or {}
+    for room in rooms_data.get("room_list") or []:
+        if room.get("conversation_id") == group_id:
+            return room.get("create_user_id") or ""
+    return ""
+
+
+def _resolve_at_list(group_id: str, at_list: list, at_names: list) -> list:
     """
-    向群发送文本。
+    合并 at_list（user_id）和 at_names（名字）→ 最终 user_id 列表。
+    at_names 中若命中 wework_group_owner_alias（默认"小李"），
+    自动替换为该群群主的 user_id。
+    其余名字从群成员缓存里按 room_nickname / username / realname / nickname 查找。
+    """
+    result = [str(uid) for uid in (at_list or []) if str(uid).strip()]
+    owner_alias = (conf().get("wework_group_owner_alias") or "小李").strip()
+
+    if at_names:
+        members_data = (_read_json(_ROOM_MEMBERS_PATH) or {}).get(group_id) or {}
+        member_list = members_data.get("member_list") or []
+        for name in at_names:
+            name = (name or "").strip()
+            if not name:
+                continue
+
+            # 群主别名：直接解析成群主 user_id
+            if name == owner_alias:
+                owner_id = _get_group_owner_id(group_id)
+                if owner_id and owner_id not in result:
+                    result.append(owner_id)
+                    logger.info(f"[PushAPI] at_names 别名 {name!r} → 群主 {owner_id}（群 {group_id}）")
+                else:
+                    logger.warning(f"[PushAPI] at_names 别名 {name!r} 未找到群主（群 {group_id}）")
+                continue
+
+            # 普通名字：在群成员里匹配
+            found = None
+            for m in member_list:
+                if name in (
+                    m.get("room_nickname") or "",
+                    m.get("username") or "",
+                    m.get("realname") or "",
+                    m.get("nickname") or "",
+                ):
+                    found = m.get("user_id") or ""
+                    break
+            if found:
+                if found not in result:
+                    result.append(found)
+            else:
+                logger.warning(f"[PushAPI] at_names 中未找到成员 {name!r}（群 {group_id}）")
+    return result
+
+
+def push_text_to_group(group_id: str, content: str,
+                       at_list: list = None, at_names: list = None):
+    """
+    向群发送文本，可选真实 @ 成员。
+    at_list: user_id 列表（直接使用）
+    at_names: 名字列表（在群成员里查成 user_id；别名如"小李"自动转为群主）
     返回 (ok: bool, error: str|None, receiver: str|None)
     """
     if not group_id or not group_id.startswith("R:"):
         return False, "group_id 格式不正确（须以 R: 开头）", None
-    wework.send_text(group_id, content)
+
+    resolved = _resolve_at_list(group_id, at_list, at_names)
+
+    # 把 at_names 里的名字从 content 中去掉（避免出现 @小李 之类的纯文字）
+    clean_content = content
+    for name in (at_names or []):
+        name = (name or "").strip()
+        if not name:
+            continue
+        import re as _re
+        # 去掉 @别名 及其后的空白/特殊空格
+        clean_content = _re.sub(
+            r'@' + _re.escape(name) + r'[\u2005\u0020]*',
+            '',
+            clean_content
+        ).strip()
+
+    if resolved:
+        wework.send_room_at_msg(group_id, clean_content, resolved)
+    else:
+        wework.send_text(group_id, clean_content)
     return True, None, group_id
+
+
+# ---------- 通用多类型发送 ----------
+
+def _collect_image_urls(data: dict) -> list:
+    urls = []
+    raw = data.get("image_urls")
+    if isinstance(raw, list):
+        urls.extend(u for u in raw if u)
+    elif isinstance(raw, str) and raw:
+        urls.append(raw)
+    single = data.get("image_url")
+    if single and single not in urls:
+        urls.append(single)
+    return urls
+
+
+def _download_image(url: str) -> str:
+    """下载图片到临时文件，返回本地路径。不立即删除，由调用方决定清理时机。"""
+    directory = os.path.join(os.getcwd(), "tmp")
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    filename = os.path.join(directory, str(uuid.uuid4()) + ".jpg")
+    resp = _requests.get(url, stream=True, timeout=30)
+    resp.raise_for_status()
+    with open(filename, "wb") as f:
+        for block in resp.iter_content(1024):
+            f.write(block)
+    return filename
+
+
+def _send_image_url(receiver: str, url: str):
+    """下载图片并发送，等企微完成后再清理临时文件。"""
+    path = _download_image(url)
+    wework.send_image(receiver, file_path=path)
+    # ntwork 是异步把文件路径交给企微进程上传，需等上传完成再删
+    # 此处等待 3 秒，足够企微读取并上传完毕
+    def _cleanup():
+        time.sleep(3)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+    threading.Thread(target=_cleanup, daemon=True).start()
+
+
+def send_to_receiver(receiver: str, item: dict,
+                     at_list: list = None, at_names: list = None):
+    """
+    向 receiver（单聊 S:xxx 或群 R:xxx）发送消息。
+    item 格式与 webhook 响应一致，支持：
+      纯文本: {"reply":"..."} / {"content":"..."}
+      图片:   {"reply_type":"image","image_url":"..."}
+      链接卡片: {"reply_type":"link_card","title":"...","url":"..."}
+      文本+多图: {"reply":"...","image_urls":["..."]}
+    群聊时可传 at_list/at_names 触发真实 @。
+    """
+    is_group = receiver.startswith("R:")
+    reply_type = (item.get("reply_type") or item.get("type") or "").lower().strip()
+    image_urls = _collect_image_urls(item)
+
+    def _send_text(text: str):
+        if is_group and (at_list or at_names):
+            resolved = _resolve_at_list(receiver, at_list, at_names)
+            clean = text
+            for name in (at_names or []):
+                name = (name or "").strip()
+                if name:
+                    clean = _re.sub(r'@' + _re.escape(name) + r'[\u2005\u0020]*', '', clean).strip()
+            if resolved:
+                # 企微 @ 消息格式：@nickname 后须有分隔符，否则正文会粘连
+                if clean and not clean.startswith(('\u2005', ' ')):
+                    clean = '\u2005' + clean
+                wework.send_room_at_msg(receiver, clean, resolved)
+                return
+        wework.send_text(receiver, text)
+
+    # 图片
+    if reply_type in ("image", "image_url"):
+        img_url = item.get("image_url") or item.get("url")
+        if img_url:
+            _send_image_url(receiver, img_url)
+        return
+
+    # 链接卡片
+    if reply_type in ("link_card", "link", "card", "sharing"):
+        card = item.get("link_card") or item
+        url = card.get("url") or item.get("url")
+        if not url:
+            wework.send_text(receiver, "链接卡片缺少 url")
+            return
+        title = card.get("title") or url
+        desc = card.get("desc") or card.get("description") or ""
+        image_url = card.get("image_url") or ""
+        text_desc = card.get("text_desc") or ""
+        if text_desc:
+            wework.send_text(receiver, text_desc)
+            time.sleep(1)
+        wework.send_link_card(receiver, title, desc, url, image_url)
+        return
+
+    # 仅有 url，无文字 → 卡片
+    if item.get("url") and not item.get("reply") and not item.get("content"):
+        url = item["url"]
+        wework.send_link_card(receiver, item.get("title") or url,
+                              item.get("desc") or "", url, item.get("image_url") or "")
+        return
+
+    # 文本 + 多图
+    text = item.get("reply") or item.get("content") or item.get("message")
+    max_images = conf().get("max_media_send_count", 3)
+    if text:
+        _send_text(str(text))
+    if image_urls:
+        for url in image_urls[:max_images]:
+            time.sleep(0.5)
+            _send_image_url(receiver, url)
+        return
+
+    # 纯图片（无文字）
+    if not text and image_urls:
+        for url in image_urls[:max_images]:
+            time.sleep(0.5)
+            _send_image_url(receiver, url)
+        return
+
+    # 纯文本兜底
+    if text:
+        return  # 已在上面发送
+    # 全空
+    logger.info(f"[PushAPI] 消息全空，跳过发送 receiver={receiver}")
 
 
 def _normalize_push_items(data) -> list:
@@ -217,20 +435,18 @@ def _push_one_item(item: dict) -> dict:
     if not isinstance(item, dict):
         return {"ok": False, "error": "消息项须为 JSON 对象"}
 
-    content = item.get("content") if item.get("content") is not None else item.get("reply")
-    if content is None or str(content) == "":
-        return {"ok": False, "error": "缺少 content"}
+    at_list = item.get("at_list") or []
+    at_names = item.get("at_names") or []
 
     # 群聊：直接传 group_id
     group_id = (item.get("group_id") or "").strip()
     if group_id:
+        if not group_id.startswith("R:"):
+            return {"ok": False, "group_id": group_id, "error": "group_id 格式不正确（须以 R: 开头）"}
         try:
-            ok, err, receiver = push_text_to_group(group_id, str(content))
-            if ok:
-                logger.info(f"[PushAPI] 群推送成功 group_id={group_id}")
-                return {"ok": True, "group_id": group_id, "receiver": receiver}
-            logger.warning(f"[PushAPI] 群推送失败 group_id={group_id} error={err}")
-            return {"ok": False, "group_id": group_id, "error": err}
+            send_to_receiver(group_id, item, at_list=at_list, at_names=at_names)
+            logger.info(f"[PushAPI] 群推送成功 group_id={group_id}")
+            return {"ok": True, "group_id": group_id, "receiver": group_id}
         except Exception as e:
             logger.exception(f"[PushAPI] 群推送异常 group_id={group_id}: {e}")
             return {"ok": False, "group_id": group_id, "error": str(e)}
@@ -247,12 +463,9 @@ def _push_one_item(item: dict) -> dict:
                 logger.warning(f"[PushAPI] 群推送失败 group_name={group_name} error=匹配到多个群")
                 return {"ok": False, "group_name": group_name, "error": "匹配到多个群，请使用 group_id"}
             gid = matched_rooms[0]["conversation_id"]
-            ok, err, receiver = push_text_to_group(gid, str(content))
-            if ok:
-                logger.info(f"[PushAPI] 群推送成功 group_name={group_name} group_id={gid}")
-                return {"ok": True, "group_name": group_name, "group_id": gid, "receiver": receiver}
-            logger.warning(f"[PushAPI] 群推送失败 group_name={group_name} error={err}")
-            return {"ok": False, "group_name": group_name, "error": err}
+            send_to_receiver(gid, item, at_list=at_list, at_names=at_names)
+            logger.info(f"[PushAPI] 群推送成功 group_name={group_name} group_id={gid}")
+            return {"ok": True, "group_name": group_name, "group_id": gid, "receiver": gid}
         except Exception as e:
             logger.exception(f"[PushAPI] 群推送异常 group_name={group_name}: {e}")
             return {"ok": False, "group_name": group_name, "error": str(e)}
@@ -262,12 +475,17 @@ def _push_one_item(item: dict) -> dict:
     if not receiver_name:
         return {"ok": False, "error": "缺少 receiver_name / group_id / group_name"}
     try:
-        ok, err, receiver = push_text_by_name(receiver_name, str(content))
-        if ok:
-            logger.info(f"[PushAPI] 推送成功 receiver_name={receiver_name} receiver={receiver}")
-            return {"ok": True, "receiver_name": receiver_name, "receiver": receiver}
-        logger.warning(f"[PushAPI] 推送失败 receiver_name={receiver_name} error={err}")
-        return {"ok": False, "receiver_name": receiver_name, "error": err}
+        matched = find_contacts_by_name(receiver_name)
+        if not matched:
+            return {"ok": False, "receiver_name": receiver_name, "error": "未找到联系人"}
+        if len(matched) > 1:
+            return {"ok": False, "receiver_name": receiver_name, "error": "匹配到多人，请使用更精确的名字"}
+        conversation_id = _resolve_conversation_id(matched[0])
+        if not conversation_id:
+            return {"ok": False, "receiver_name": receiver_name, "error": "联系人缺少 conversation_id"}
+        send_to_receiver(conversation_id, item)
+        logger.info(f"[PushAPI] 推送成功 receiver_name={receiver_name} receiver={conversation_id}")
+        return {"ok": True, "receiver_name": receiver_name, "receiver": conversation_id}
     except Exception as e:
         logger.exception(f"[PushAPI] 推送异常 receiver_name={receiver_name}: {e}")
         return {"ok": False, "receiver_name": receiver_name, "error": str(e)}
@@ -300,6 +518,8 @@ class _PushHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": f"无效 JSON: {e}"})
             return
 
+        logger.info(f"[PushAPI] 收到推送请求 from={self.client_address[0]} body={json.dumps(data, ensure_ascii=False)}")
+
         items = _normalize_push_items(data)
         if not items:
             self._send_json(400, {"ok": False, "error": "请求体须为对象、messages 数组或消息数组"})
@@ -314,9 +534,11 @@ class _PushHandler(BaseHTTPRequestHandler):
         ):
             r = results[0]
             if r.get("ok"):
+                logger.info(f"[PushAPI] 推送完成 receiver={r.get('receiver')}")
                 self._send_json(200, {"ok": True, "receiver": r.get("receiver")})
             else:
                 err = r.get("error") or "推送失败"
+                logger.warning(f"[PushAPI] 推送失败 error={err}")
                 status = 400
                 if err == "未找到联系人":
                     status = 404
@@ -325,6 +547,7 @@ class _PushHandler(BaseHTTPRequestHandler):
                 self._send_json(status, {"ok": False, "error": err})
             return
 
+        logger.info(f"[PushAPI] 批量推送完成 total={len(results)} success={sum(1 for r in results if r.get('ok'))} failed={sum(1 for r in results if not r.get('ok'))}")
         self._send_json(
             200 if all_ok else 207,
             {

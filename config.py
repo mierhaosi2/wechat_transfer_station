@@ -105,6 +105,9 @@ available_setting = {
 
     # 群聊中视为群主的发送人 user_id 白名单（命中后 is_group_owner=true）
     "wework_group_owner_whitelist": [],
+
+    # at_names 中用于指代群主的占位别名，本服务自动替换为该群群主 user_id
+    "wework_group_owner_alias": "小李",
 }
 
 
