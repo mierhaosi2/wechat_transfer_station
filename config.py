@@ -99,6 +99,10 @@ available_setting = {
     # 主动推送发送接口（本服务监听，供外部服务调用；为空则不启用）
     "msg_push_url": "",
 
+    # 群配置查询接口（入群欢迎前查 welcomeEnabled；为空则不查直接发）
+    # GET {group_config_url}?groupId=R:xxx  → {"welcomeEnabled": true/false}
+    "group_config_url": "",
+
     # ntwork 绑定的企微版本（关于页版本）；不配则默认 4.0.8.6027
     "wework_version": "4.0.8.6027",
     "wework_exe_path": "",

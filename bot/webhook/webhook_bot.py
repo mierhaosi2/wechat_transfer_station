@@ -105,6 +105,9 @@ class WebhookBot(Bot):
         except requests.Timeout:
             logger.error(f"[Webhook] 请求超时 ({timeout}s): {webhook_url}")
             return Reply(ReplyType.ERROR, "服务响应超时")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"[Webhook] 连接失败（服务不可达，静默忽略）: {e}")
+            return None
         except requests.HTTPError as e:
             logger.error(f"[Webhook] HTTP错误: {e}")
             return Reply(ReplyType.ERROR, f"服务返回错误: {e}")

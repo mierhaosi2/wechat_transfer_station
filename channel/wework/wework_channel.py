@@ -385,6 +385,28 @@ class WeworkChannel(ChatChannel):
             if owner_id:
                 _group_owner_cache[group_id] = (owner_id, owner_name)
             logger.info(f"[WX][入群欢迎] 群={group_id} 新成员={nickname} 群主={owner_name}({owner_id})")
+
+            # 查外部群配置，welcomeEnabled=false 时跳过开场白
+            group_config_url = conf().get("group_config_url", "")
+            if group_config_url:
+                try:
+                    full_url = f"{group_config_url}?groupId={group_id}"
+                    logger.info(f"[WX][入群欢迎] 查询群配置 GET {full_url}")
+                    resp = requests.get(group_config_url, params={"groupId": group_id}, timeout=5)
+                    logger.info(f"[WX][入群欢迎] 群配置响应 status={resp.status_code} body={resp.text[:500]}")
+                    resp.raise_for_status()
+                    cfg = resp.json()
+                    welcome_enabled = cfg.get("data", cfg).get("welcomeEnabled", True)
+                    if not welcome_enabled:
+                        logger.info(f"[WX][入群欢迎] 群={group_id} welcomeEnabled=false，跳过开场白")
+                        return
+                    else:
+                        logger.info(f"[WX][入群欢迎] 群={group_id} welcomeEnabled=true，继续发送开场白")
+                except Exception as e:
+                    logger.warning(f"[WX][入群欢迎] 查询 group_config_url 失败，降级发送开场白: {e}")
+            else:
+                logger.info(f"[WX][入群欢迎] group_config_url 未配置，直接发送开场白")
+
             welcome_msg = conf().get("group_welcome_msg", "")
             at_list = []
             if welcome_msg:
