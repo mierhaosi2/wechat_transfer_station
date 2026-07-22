@@ -408,6 +408,12 @@ class WeworkChannel(ChatChannel):
                 logger.info(f"[WX][入群欢迎] group_config_url 未配置，直接发送开场白")
 
             welcome_msg = conf().get("group_welcome_msg", "")
+            # 按 wechatcom_corp_id 查专属开场白，找不到再用通用 group_welcome_msg
+            corp_id = conf().get("wechatcom_corp_id", "")
+            welcome_msg_map = conf().get("group_welcome_msg_map", {})
+            if corp_id and corp_id in welcome_msg_map:
+                welcome_msg = welcome_msg_map[corp_id]
+                logger.info(f"[WX][入群欢迎] 使用 corp_id={corp_id} 专属开场白")
             at_list = []
             if welcome_msg:
                 # {owner} 替换为 @owner_name，并加入 at_list 实现真正的 @

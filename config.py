@@ -99,7 +99,8 @@ available_setting = {
     # 主动推送发送接口（本服务监听，供外部服务调用；为空则不启用）
     "msg_push_url": "",
 
-    # 群配置查询接口（入群欢迎前查 welcomeEnabled；为空则不查直接发）
+    # 群欢迎语（按 wechatcom_corp_id 区分，优先于 group_welcome_msg）
+    "group_welcome_msg_map": {},
     # GET {group_config_url}?groupId=R:xxx  → {"welcomeEnabled": true/false}
     "group_config_url": "",
 
