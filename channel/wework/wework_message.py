@@ -45,7 +45,10 @@ def cdn_download(wework, message, file_name):
 
     # 获取当前工作目录，然后与文件名拼接得到保存路径
     current_dir = os.getcwd()
-    save_path = os.path.join(current_dir, "tmp", file_name)
+    tmp_dir = os.path.join(current_dir, "tmp")
+    if not os.path.exists(tmp_dir):
+        os.makedirs(tmp_dir)
+    save_path = os.path.join(tmp_dir, file_name)
 
     # 下载保存图片到本地
     if "url" in data["cdn"].keys() and "auth_key" in data["cdn"].keys():
@@ -75,7 +78,9 @@ def cdn_download(wework, message, file_name):
         return
 
     # 输出下载结果
-    logger.debug(f"result: {result}")
+    exists = os.path.isfile(save_path)
+    size = os.path.getsize(save_path) if exists else 0
+    logger.info(f"[cdn_download] save_path={save_path} exists={exists} size={size} result={result}")
 
 
 def c2c_download_and_convert(wework, message, file_name):
@@ -86,14 +91,20 @@ def c2c_download_and_convert(wework, message, file_name):
     file_id = data["cdn"]["file_id"]
 
     current_dir = os.getcwd()
-    save_path = os.path.join(current_dir, "tmp", file_name)
+    tmp_dir = os.path.join(current_dir, "tmp")
+    if not os.path.exists(tmp_dir):
+        os.makedirs(tmp_dir)
+    save_path = os.path.join(tmp_dir, file_name)
     result = wework.c2c_cdn_download(file_id, aes_key, file_size, file_type, save_path)
-    logger.debug(result)
+    logger.info(f"[voice_download] silk result={result} path={save_path}")
 
     # 在下载完SILK文件之后，立即将其转换为WAV文件
     base_name, _ = os.path.splitext(save_path)
     wav_file = base_name + ".wav"
     pilk.silk_to_wav(save_path, wav_file, rate=24000)
+    exists = os.path.isfile(wav_file)
+    size = os.path.getsize(wav_file) if exists else 0
+    logger.info(f"[voice_download] wav exists={exists} size={size} path={wav_file}")
 
     # 删除SILK文件
     try:
@@ -126,6 +137,7 @@ class WeworkMessage(ChatMessage):
                 current_dir = os.getcwd()
                 self.ctype = ContextType.VOICE
                 self.content = os.path.join(current_dir, "tmp", file_name_2)
+                self.voice_duration = wework_msg.get("data", {}).get("duration") or 0
                 self._prepare_fn = lambda: c2c_download_and_convert(wework, wework_msg, file_name)
             elif wework_msg["type"] == 11042:  # 图片消息类型，需要下载文件
                 file_name = datetime.datetime.now().strftime('%Y%m%d%H%M%S') + ".jpg"
@@ -144,7 +156,15 @@ class WeworkMessage(ChatMessage):
                 self._prepare_fn = lambda: cdn_download(wework, wework_msg, file_name)
             elif wework_msg["type"] == 11047:  # 链接消息
                 self.ctype = ContextType.SHARING
-                self.content = wework_msg['data']['url']
+                data = wework_msg.get("data") or {}
+                self.content = data.get("url") or data.get("link_url") or ""
+                self.share_title = data.get("title") or data.get("name") or ""
+                self.share_desc = data.get("desc") or data.get("description") or data.get("digest") or ""
+                self.share_image_url = data.get("image_url") or data.get("img_url") or data.get("cover") or ""
+                logger.info(
+                    f"[WX][链接消息] url={self.content} title={self.share_title} "
+                    f"desc={self.share_desc} raw={json.dumps(wework_msg, ensure_ascii=False)}"
+                )
             elif wework_msg["type"] == 11072:  # 新成员入群通知
                 self.ctype = ContextType.JOIN_GROUP
                 member_list = wework_msg['data']['member_list']

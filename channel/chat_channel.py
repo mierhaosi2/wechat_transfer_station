@@ -185,40 +185,85 @@ class ChatChannel(Channel):
             if context.type == ContextType.TEXT or context.type == ContextType.IMAGE_CREATE:  # 文字和图片消息
                 context["channel"] = e_context["channel"]
                 reply = super().build_reply_content(context.content, context)
-            elif context.type == ContextType.VOICE:  # 语音消息
+            elif context.type == ContextType.VOICE:  # 语音：下载转 wav → 回调 FAI → 成功后删 tmp
                 cmsg = context["msg"]
-                cmsg.prepare()
-                file_path = context.content
-                wav_path = os.path.splitext(file_path)[0] + ".wav"
-                try:
-                    any_to_wav(file_path, wav_path)
-                except Exception as e:  # 转换失败，直接使用mp3，对于某些api，mp3也可以识别
-                    logger.warning("[WX]any to wav error, use raw path. " + str(e))
-                    wav_path = file_path
-                # 语音识别
-                reply = super().build_voice_to_text(wav_path)
-                # 删除临时文件
-                try:
-                    os.remove(file_path)
-                    if wav_path != file_path:
-                        os.remove(wav_path)
-                except Exception as e:
-                    pass
-                    # logger.warning("[WX]delete temp file error: " + str(e))
+                save_path = context.content
+                # webhook 模式：暂存音频并回调，不做本地 ASR
+                if conf().get("model") == "webhook":
+                    try:
+                        cmsg.prepare()
+                        save_path = context.content
+                        if not (save_path and os.path.isfile(save_path) and os.path.getsize(save_path) > 0):
+                            logger.error("[WX]语音下载失败，文件不存在或为空: {}".format(save_path))
+                            return reply
+                        logger.info("[WX]语音已保存: {} ({} bytes)".format(save_path, os.path.getsize(save_path)))
+                        context["channel"] = e_context["channel"]
+                        reply = super().build_reply_content(save_path, context)
+                        if reply is not None and getattr(reply, "type", None) != ReplyType.ERROR:
+                            try:
+                                os.remove(save_path)
+                                logger.info("[WX]已删除临时语音: {}".format(save_path))
+                            except Exception as e:
+                                logger.warning("[WX]删除临时语音失败: {} err={}".format(save_path, e))
+                        else:
+                            logger.warning("[WX]回调失败，保留临时语音: {}".format(save_path))
+                    except Exception as e:
+                        logger.error("[WX]语音处理异常: {}".format(e))
+                else:
+                    cmsg.prepare()
+                    file_path = context.content
+                    wav_path = os.path.splitext(file_path)[0] + ".wav"
+                    try:
+                        any_to_wav(file_path, wav_path)
+                    except Exception as e:  # 转换失败，直接使用mp3，对于某些api，mp3也可以识别
+                        logger.warning("[WX]any to wav error, use raw path. " + str(e))
+                        wav_path = file_path
+                    # 语音识别
+                    reply = super().build_voice_to_text(wav_path)
+                    # 删除临时文件
+                    try:
+                        os.remove(file_path)
+                        if wav_path != file_path:
+                            os.remove(wav_path)
+                    except Exception as e:
+                        pass
 
-                if reply.type == ReplyType.TEXT:
-                    new_context = self._compose_context(ContextType.TEXT, reply.content, **context.kwargs)
-                    if new_context:
-                        reply = self._generate_reply(new_context)
+                    if reply.type == ReplyType.TEXT:
+                        new_context = self._compose_context(ContextType.TEXT, reply.content, **context.kwargs)
+                        if new_context:
+                            reply = self._generate_reply(new_context)
+                        else:
+                            return
+            elif context.type == ContextType.IMAGE:  # 图片消息：下载 → 回调 FAI → 成功后删 tmp
+                cmsg = context["msg"]
+                save_path = context.content
+                try:
+                    cmsg.prepare()  # 触发 cdn_download，否则只有路径不会落盘
+                    save_path = context.content
+                    if not (save_path and os.path.isfile(save_path) and os.path.getsize(save_path) > 0):
+                        logger.error("[WX]图片下载失败，文件不存在或为空: {}".format(save_path))
+                        return reply
+                    logger.info("[WX]图片已保存: {} ({} bytes)".format(save_path, os.path.getsize(save_path)))
+                    memory.USER_IMAGE_CACHE[context["session_id"]] = {
+                        "path": save_path,
+                        "msg": cmsg,
+                    }
+                    context["channel"] = e_context["channel"]
+                    reply = super().build_reply_content(save_path, context)
+                    # webhook 成功（非 ERROR / 非连接失败 None）后删除本地临时图
+                    if reply is not None and getattr(reply, "type", None) != ReplyType.ERROR:
+                        try:
+                            os.remove(save_path)
+                            logger.info("[WX]已删除临时图片: {}".format(save_path))
+                        except Exception as e:
+                            logger.warning("[WX]删除临时图片失败: {} err={}".format(save_path, e))
                     else:
-                        return
-            elif context.type == ContextType.IMAGE:  # 图片消息，当前仅做下载保存到本地的逻辑
-                memory.USER_IMAGE_CACHE[context["session_id"]] = {
-                    "path": context.content,
-                    "msg": context.get("msg")
-                }
-            elif context.type == ContextType.SHARING:  # 分享信息，当前无默认逻辑
-                pass
+                        logger.warning("[WX]回调失败，保留临时图片: {}".format(save_path))
+                except Exception as e:
+                    logger.error("[WX]图片处理异常: {}".format(e))
+            elif context.type == ContextType.SHARING:  # 链接/分享：回调 FAI
+                context["channel"] = e_context["channel"]
+                reply = super().build_reply_content(context.content, context)
             elif context.type == ContextType.FUNCTION or context.type == ContextType.FILE:  # 文件消息及函数调用等，当前无默认逻辑
                 pass
             else:

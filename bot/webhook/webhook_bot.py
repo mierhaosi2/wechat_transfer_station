@@ -1,4 +1,8 @@
 # encoding:utf-8
+import base64
+import os
+import re as _re
+
 import requests
 from bot.bot import Bot
 from bridge.context import Context, ContextType
@@ -7,12 +11,22 @@ from common.log import logger
 from config import conf
 
 
+def _is_http_url(text: str) -> bool:
+    """整段内容是否为 http(s) 链接（允许末尾少量空白/标点）。"""
+    if not text:
+        return False
+    s = text.strip().rstrip(")。.,，。!！?？\"'」』】>")
+    return bool(_re.match(r"^https?://\S+$", s, _re.IGNORECASE))
+
+
 class WebhookBot(Bot):
     """
     将消息转发给外部 HTTP 服务，并将其返回内容作为回复。
 
-    外部服务接收 POST JSON：
+    外部服务接收 POST JSON（文本）：
     {
+        "event_type": "message",
+        "msg_type": "text",
         "msg_id": "消息ID",
         "query": "用户消息内容",
         "session_id": "会话ID",
@@ -21,6 +35,33 @@ class WebhookBot(Bot):
         "sender_name": "发送人昵称",
         "group_id": "群ID（群聊时）",
         "group_name": "群名（群聊时）"
+    }
+
+    图片消息额外字段：
+    {
+        "msg_type": "image",
+        "query": "",
+        "image_base64": "...",
+        "image_name": "xxx.jpg"
+    }
+
+    链接/分享消息：
+    {
+        "msg_type": "link",
+        "query": "https://...",
+        "url": "https://...",
+        "title": "...",
+        "desc": "...",
+        "image_url": "..."
+    }
+
+    语音消息：
+    {
+        "msg_type": "voice",
+        "query": "",
+        "voice_base64": "...",
+        "voice_name": "xxx.wav",
+        "duration": 2
     }
 
     外部服务返回 JSON 示例：
@@ -54,7 +95,13 @@ class WebhookBot(Bot):
     """
 
     def reply(self, query, context: Context = None) -> Reply:
-        if context.type not in (ContextType.TEXT, ContextType.IMAGE_CREATE):
+        if context.type not in (
+            ContextType.TEXT,
+            ContextType.IMAGE_CREATE,
+            ContextType.IMAGE,
+            ContextType.SHARING,
+            ContextType.VOICE,
+        ):
             return Reply(ReplyType.ERROR, "暂不支持该消息类型")
 
         webhook_url = conf().get("msg_webhook_url", "")
@@ -62,12 +109,70 @@ class WebhookBot(Bot):
             return Reply(ReplyType.ERROR, "[WebhookBot] msg_webhook_url 未配置")
 
         msg = context.get("msg")
-        # @ 机器人时去掉开头的 @名字，只取实际问题内容
-        import re as _re
         is_at = msg.is_at if msg else False
-        clean_query = _re.sub(r'@\S+[\u2005\u0020]*', '', query or '').strip() if is_at else (query or '')
+
+        msg_type = "text"
+        image_base64 = ""
+        image_name = ""
+        voice_base64 = ""
+        voice_name = ""
+        voice_duration = 0
+        clean_query = ""
+        link_url = ""
+        link_title = ""
+        link_desc = ""
+        link_image_url = ""
+
+        if context.type == ContextType.IMAGE:
+            msg_type = "image"
+            image_path = context.content or ""
+            image_name = os.path.basename(image_path) if image_path else ""
+            if not image_path or not os.path.isfile(image_path):
+                return Reply(ReplyType.ERROR, f"图片文件不存在: {image_path}")
+            try:
+                with open(image_path, "rb") as f:
+                    image_base64 = base64.b64encode(f.read()).decode("ascii")
+            except Exception as e:
+                return Reply(ReplyType.ERROR, f"读取图片失败: {e}")
+        elif context.type == ContextType.VOICE:
+            msg_type = "voice"
+            voice_path = context.content or ""
+            voice_name = os.path.basename(voice_path) if voice_path else ""
+            voice_duration = getattr(msg, "voice_duration", None) or 0
+            if not voice_path or not os.path.isfile(voice_path):
+                return Reply(ReplyType.ERROR, f"语音文件不存在: {voice_path}")
+            try:
+                with open(voice_path, "rb") as f:
+                    voice_base64 = base64.b64encode(f.read()).decode("ascii")
+            except Exception as e:
+                return Reply(ReplyType.ERROR, f"读取语音失败: {e}")
+        elif context.type == ContextType.SHARING:
+            msg_type = "link"
+            link_url = (context.content or "").strip()
+            clean_query = link_url
+            link_title = getattr(msg, "share_title", None) or ""
+            link_desc = getattr(msg, "share_desc", None) or ""
+            link_image_url = getattr(msg, "share_image_url", None) or ""
+            if not link_url and msg and getattr(msg, "_rawmsg", None):
+                data = (msg._rawmsg or {}).get("data") or {}
+                link_url = data.get("url") or data.get("link_url") or ""
+                clean_query = link_url
+                link_title = link_title or data.get("title") or data.get("name") or ""
+                link_desc = link_desc or data.get("desc") or data.get("description") or ""
+                link_image_url = link_image_url or data.get("image_url") or data.get("img_url") or ""
+            if not link_url:
+                return Reply(ReplyType.ERROR, "链接消息缺少 url")
+        else:
+            # @ 机器人时去掉开头的 @名字，只取实际问题内容
+            clean_query = _re.sub(r'@\S+[\u2005\u0020]*', '', query or '').strip() if is_at else (query or '')
+            # 纯文本里直接贴的 http(s) 链接（公众号/小红书等）也按 link 回调
+            if _is_http_url(clean_query):
+                msg_type = "link"
+                link_url = clean_query
+
         payload = {
             "event_type": "message",
+            "msg_type": msg_type,
             "msg_id": msg.msg_id if msg else "",
             "query": clean_query,
             "session_id": context.get("session_id", ""),
@@ -81,6 +186,18 @@ class WebhookBot(Bot):
             "silence_reason": context.get("silence_reason", ""),
             "corp_id": conf().get("wechatcom_corp_id", ""),
         }
+        if msg_type == "image":
+            payload["image_base64"] = image_base64
+            payload["image_name"] = image_name
+        elif msg_type == "voice":
+            payload["voice_base64"] = voice_base64
+            payload["voice_name"] = voice_name
+            payload["duration"] = voice_duration
+        elif msg_type == "link":
+            payload["url"] = link_url
+            payload["title"] = link_title
+            payload["desc"] = link_desc
+            payload["image_url"] = link_image_url
         if msg and msg.is_group and msg.other_user_id:
             payload["group_id"] = msg.other_user_id
             payload["group_name"] = msg.other_user_nickname or ""
@@ -88,7 +205,14 @@ class WebhookBot(Bot):
             payload["group_owner_name"] = context.get("group_owner_name", "")
 
         timeout = conf().get("msg_webhook_timeout") or None
-        logger.info(f"[Webhook] POST {webhook_url} payload={payload}")
+        log_payload = dict(payload)
+        if "image_base64" in log_payload:
+            b64 = log_payload["image_base64"]
+            log_payload["image_base64"] = f"<{len(b64)} chars>"
+        if "voice_base64" in log_payload:
+            b64 = log_payload["voice_base64"]
+            log_payload["voice_base64"] = f"<{len(b64)} chars>"
+        logger.info(f"[Webhook] POST {webhook_url} payload={log_payload}")
 
         try:
             resp = requests.post(webhook_url, json=payload, timeout=timeout)
@@ -154,7 +278,7 @@ class WebhookBot(Bot):
                     "url": url,
                     "image_url": card.get("image_url") or data.get("image_url") or "",
                     "text_desc": card.get("text_desc") or data.get("text_desc") or "",
-                    "answer":card.get("answer") or data.get("answer") or "",
+                    "answer": card.get("answer") or data.get("answer") or "",
                 },
             )
 
@@ -168,7 +292,7 @@ class WebhookBot(Bot):
                     "url": data["url"],
                     "image_url": data.get("image_url") or "",
                     "text_desc": data.get("text_desc") or "",
-                    "answer":card.get("answer") or data.get("answer") or "",
+                    "answer": data.get("answer") or "",
                 },
             )
 

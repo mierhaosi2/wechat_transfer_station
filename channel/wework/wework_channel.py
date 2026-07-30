@@ -285,9 +285,10 @@ class WeworkChannel(ChatChannel):
             return
 
         if cmsg.ctype == ContextType.VOICE:
-            if not conf().get("speech_recognition"):
+            # webhook 模式下下载暂存并回调；旧 ASR 模式仍受 speech_recognition 控制
+            if conf().get("model") != "webhook" and not conf().get("speech_recognition"):
                 return
-            logger.debug("[WX]receive voice msg: {}".format(cmsg.content))
+            logger.info("[WX]receive voice msg: {}".format(cmsg.content))
         elif cmsg.ctype == ContextType.IMAGE:
             logger.debug("[WX]receive image msg: {}".format(cmsg.content))
         elif cmsg.ctype == ContextType.PATPAT:
@@ -372,9 +373,9 @@ class WeworkChannel(ChatChannel):
                 silence_mode = True
                 silence_reason = "at_others"
         if cmsg.ctype == ContextType.VOICE:
-            if not conf().get("speech_recognition"):
+            if conf().get("model") != "webhook" and not conf().get("speech_recognition"):
                 return
-            logger.debug("[WX]receive voice for group msg: {}".format(cmsg.content))
+            logger.info("[WX]receive voice for group msg: {}".format(cmsg.content))
         elif cmsg.ctype == ContextType.IMAGE:
             logger.debug("[WX]receive image for group msg: {}".format(cmsg.content))
         elif cmsg.ctype == ContextType.JOIN_GROUP:
