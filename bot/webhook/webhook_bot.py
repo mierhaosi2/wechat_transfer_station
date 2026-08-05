@@ -203,6 +203,7 @@ class WebhookBot(Bot):
             payload["group_name"] = msg.other_user_nickname or ""
             payload["group_owner_id"] = context.get("group_owner_id", "")
             payload["group_owner_name"] = context.get("group_owner_name", "")
+            payload["groupMembers"] = context.get("group_members", [])
 
         timeout = conf().get("msg_webhook_timeout") or None
         log_payload = dict(payload)

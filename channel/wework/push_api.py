@@ -326,6 +326,38 @@ def _send_image_url(receiver: str, url: str):
     threading.Thread(target=_cleanup, daemon=True).start()
 
 
+def _download_file(url: str, filename: str = None) -> str:
+    """下载任意文件到临时目录，返回本地路径。"""
+    directory = os.path.join(os.getcwd(), "tmp")
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    if not filename:
+        # 从 URL 提取文件名，失败则用 UUID
+        raw_name = url.rstrip("/").split("/")[-1].split("?")[0]
+        filename = raw_name if raw_name else str(uuid.uuid4())
+    local_path = os.path.join(directory, filename)
+    resp = _requests.get(url, stream=True, timeout=60)
+    resp.raise_for_status()
+    with open(local_path, "wb") as f:
+        for block in resp.iter_content(8192):
+            f.write(block)
+    return local_path
+
+
+def _send_file(receiver: str, file_path: str, delete_after: bool = False):
+    """发送本地文件，可选发送后延迟删除。"""
+    wework.send_file(receiver, file_path)
+    if delete_after:
+        def _cleanup():
+            time.sleep(5)
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
+        threading.Thread(target=_cleanup, daemon=True).start()
+
+
 def send_to_receiver(receiver: str, item: dict,
                      at_list: list = None, at_names: list = None):
     """
@@ -356,6 +388,26 @@ def send_to_receiver(receiver: str, item: dict,
                 wework.send_room_at_msg(receiver, clean, resolved)
                 return
         wework.send_text(receiver, text)
+
+    if reply_type in ("file","file_url"):
+        file_url = item.get("file_url") or item.get("url")
+        file_path = item.get("file_path")
+        if file_path:
+            if os.path.exists(file_path):
+                _send_file(receiver, file_path)
+            else:
+                logger.warning(f"[PushAPI] 文件不存在: {file_path}")
+        elif file_url:
+            try:
+                filename = item.get("filename")
+                local_path = _download_file(file_url, filename)
+                _send_file(receiver, local_path, delete_after=True)
+                logger.info(f"[PushAPI] 下载并发送文件 url={file_url} receiver={receiver}")
+            except Exception as e:
+                logger.error(f"[PushAPI] 下载文件失败 url={file_url}: {e}")
+        else:
+            logger.warning(f"[PushAPI] file 类型消息缺少 file_url 或 file_path")
+        return
 
     # 图片
     if reply_type in ("image", "image_url"):

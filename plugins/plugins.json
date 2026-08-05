@@ -1,7 +1,7 @@
 {
     "plugins": {
         "Godcmd": {
-            "enabled": true,
+            "enabled": false,
             "priority": 999
         },
         "Keyword": {

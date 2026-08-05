@@ -29,6 +29,9 @@ _internal_user_last_msg_time: dict = {}
 _group_owner_cache: dict = {}
 # 记录每个群最近一次 at_manager 的时间戳 {group_id: timestamp}
 _at_manager_last_time: dict = {}
+# 群成员列表缓存 {group_id: (names_list, fetch_timestamp)}，TTL = 5 分钟
+_group_members_cache: dict = {}
+_GROUP_MEMBERS_CACHE_TTL = 300
 
 def get_wxid_by_name(room_members, group_wxid, name):
     if group_wxid in room_members:
@@ -443,6 +446,35 @@ class WeworkChannel(ChatChannel):
             owner_id, owner_name = resolve_group_owner(group_id)
             context["group_owner_id"] = owner_id
             context["group_owner_name"] = owner_name
+            # 实时拉取群成员昵称列表（5 分钟内存缓存）
+            try:
+                _cached = _group_members_cache.get(group_id)
+                if _cached and (time.time() - _cached[1]) < _GROUP_MEMBERS_CACHE_TTL:
+                    context["group_members"] = _cached[0]
+                else:
+                    _members_resp = wework.get_room_members(group_id)
+                    _member_list = (_members_resp or {}).get("member_list") or []
+                    _members = []
+                    for _m in _member_list:
+                        _uid = _m.get("user_id") or ""
+                        _room_nickname = _m.get("room_nickname") or ""
+                        _username = _m.get("username") or ""
+                        _realname = _m.get("realname") or ""
+                        _display = _room_nickname or _username or _realname
+                        if not _uid and not _display:
+                            continue
+                        _members.append({
+                            "user_id": _uid,
+                            "room_nickname": _room_nickname,
+                            "username": _username,
+                            "realname": _realname,
+                            "display_name": _display,
+                        })
+                    _group_members_cache[group_id] = (_members, time.time())
+                    context["group_members"] = _members
+            except Exception as _e:
+                logger.warning("[WX] 拉取群成员失败: {}".format(_e))
+                context["group_members"] = []
             sender_id = cmsg.actual_user_id or ""
             owner_whitelist = conf().get("wework_group_owner_whitelist") or []
             in_owner_whitelist = bool(sender_id and str(sender_id) in [str(x) for x in owner_whitelist])
@@ -564,6 +596,16 @@ class WeworkChannel(ChatChannel):
             else:
                 wework.send_video(receiver, video_path)
             logger.info("[WX] sendVideo, receiver={}".format(receiver))
+        elif reply.type == ReplyType.FILE:
+            file_path = reply.content
+            if not os.path.isabs(file_path):
+                file_path = os.path.join(os.getcwd(), "tmp", os.path.basename(file_path))
+            if os.path.exists(file_path):
+                wework.send_file(receiver, file_path)
+                logger.info("[WX] sendFile={}, receiver={}".format(file_path, receiver))
+            else:
+                logger.error("[WX] sendFile 文件不存在: {}".format(file_path))
+                wework.send_text(receiver, "文件发送失败：找不到文件")
         elif reply.type == ReplyType.VOICE:
             current_dir = os.getcwd()
             voice_file = reply.content.split("/")[-1]
