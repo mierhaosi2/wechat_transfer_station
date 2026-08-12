@@ -522,10 +522,35 @@ def _push_one_item(item: dict) -> dict:
             logger.exception(f"[PushAPI] 群推送异常 group_name={group_name}: {e}")
             return {"ok": False, "group_name": group_name, "error": str(e)}
 
+    # 单聊：直接传 receiver_id（user_id），通过联系人缓存或 login_info 拼 conversation_id
+    receiver_id = (item.get("receiver_id") or "").strip()
+    if receiver_id:
+        try:
+            # 先在联系人里找，拿到带 conversation_id 的 user 对象
+            all_users = _load_all_users()
+            matched_by_id = [u for u in all_users if (u.get("user_id") or "").strip() == receiver_id]
+            if matched_by_id:
+                cid = _resolve_conversation_id(matched_by_id[0])
+            else:
+                try:
+                    login_info = wework.get_login_info() or {}
+                except Exception:
+                    login_info = {}
+                self_id = (login_info.get("user_id") or "").strip()
+                cid = f"S:{self_id}_{receiver_id}" if self_id else ""
+            if not cid:
+                return {"ok": False, "receiver_id": receiver_id, "error": "无法解析 conversation_id，请检查登录状态"}
+            send_to_receiver(cid, item, at_list=at_list, at_names=at_names)
+            logger.info(f"[PushAPI] 推送成功 receiver_id={receiver_id} conversation_id={cid}")
+            return {"ok": True, "receiver_id": receiver_id, "receiver": cid}
+        except Exception as e:
+            logger.exception(f"[PushAPI] 推送异常 receiver_id={receiver_id}: {e}")
+            return {"ok": False, "receiver_id": receiver_id, "error": str(e)}
+
     # 单聊：按名字查找
     receiver_name = (item.get("receiver_name") or item.get("name") or "").strip()
     if not receiver_name:
-        return {"ok": False, "error": "缺少 receiver_name / group_id / group_name"}
+        return {"ok": False, "error": "缺少 receiver_name / receiver_id / group_id / group_name"}
     try:
         matched = find_contacts_by_name(receiver_name)
         if not matched:
