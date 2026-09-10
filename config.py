@@ -101,7 +101,6 @@ available_setting = {
 
     # 群欢迎语（按 wechatcom_corp_id 区分，优先于 group_welcome_msg）
     "group_welcome_msg_map": {},
-    # GET {group_config_url}?groupId=R:xxx  → {"welcomeEnabled": true/false}
     "group_config_url": "",
 
     # ntwork 绑定的企微版本（关于页版本）；不配则默认 4.0.8.6027

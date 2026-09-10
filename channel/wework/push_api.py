@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests as _requests
 
@@ -22,6 +22,8 @@ _INNER_CONTACTS_PATH = os.path.join(_TMP_DIR, "wework_inner_contacts.json")
 _ROOM_MEMBERS_PATH = os.path.join(_TMP_DIR, "wework_room_members.json")
 _NAME_FIELDS = ("remark", "nickname", "username", "realname", "room_nickname", "acctid")
 _listen_path = "/push/text"
+_ROOM_GROUPS_PATH = "/push/groups"
+_ROOM_CACHE_LOCK = threading.Lock()
 
 
 def _ensure_tmp_dir():
@@ -168,18 +170,68 @@ def push_text_by_name(receiver_name: str, content: str):
     return True, None, conversation_id
 
 
-def _load_rooms() -> list:
-    """实时拉取群列表，失败则回退缓存。"""
+def _load_rooms(refresh: bool = True) -> list:
+    """实时拉取群列表，失败或关闭刷新时回退缓存。"""
     rooms_path = os.path.join(_TMP_DIR, "wework_rooms.json")
-    try:
-        rooms = wework.get_rooms()
-        if rooms and isinstance(rooms.get("room_list"), list):
-            _write_json(rooms_path, rooms)
-            return rooms["room_list"]
-    except Exception as e:
-        logger.warning(f"[PushAPI] 获取群列表失败，回退缓存: {e}")
+    if refresh:
+        try:
+            rooms = wework.get_rooms()
+            if rooms and isinstance(rooms.get("room_list"), list):
+                _write_json(rooms_path, rooms)
+                return rooms["room_list"]
+        except Exception as e:
+            logger.warning(f"[PushAPI] 获取群列表失败，回退缓存: {e}")
     data = _read_json(rooms_path) or {}
     return data.get("room_list") or []
+
+
+def _load_room_members(group_id: str, refresh: bool = True) -> list:
+    """按群 ID 获取成员；实时查询失败时回退对应群的本地缓存。"""
+    if not group_id:
+        return []
+
+    with _ROOM_CACHE_LOCK:
+        cached_rooms = _read_json(_ROOM_MEMBERS_PATH) or {}
+
+    if refresh:
+        try:
+            members = wework.get_room_members(group_id)
+            if members and isinstance(members.get("member_list"), list):
+                with _ROOM_CACHE_LOCK:
+                    cached_rooms[group_id] = members
+                    _write_json(_ROOM_MEMBERS_PATH, cached_rooms)
+                return members["member_list"]
+        except Exception as e:
+            logger.warning(f"[PushAPI] 获取群成员失败 group_id={group_id}，回退缓存: {e}")
+
+    members = cached_rooms.get(group_id) or {}
+    return members.get("member_list") or []
+
+
+def _room_payload(room: dict, include_members: bool = False, refresh: bool = True) -> dict:
+    """将 ntwork 群对象转换为对外稳定的数据结构。"""
+    payload = {
+        "conversation_id": room.get("conversation_id") or "",
+        "name": room.get("nickname") or "",
+        "nickname": room.get("nickname") or "",
+        "create_time": room.get("create_time"),
+        "create_user_id": room.get("create_user_id") or "",
+        "is_creator": bool(room.get("is_creator")),
+        "is_admin": bool(room.get("is_admin")),
+        "is_external": bool(room.get("is_external")),
+        "member_count": room.get("total", 0),
+    }
+    if include_members:
+        members = _load_room_members(payload["conversation_id"], refresh=refresh)
+        payload["member_count"] = len(members)
+        payload["members"] = members
+    return payload
+
+
+def _find_room(group_id: str, refresh: bool = True):
+    """按 conversation_id 查找群，找不到时返回 None。"""
+    rooms = _load_rooms(refresh=refresh)
+    return next((room for room in rooms if room.get("conversation_id") == group_id), None)
 
 
 def find_rooms_by_name(group_name: str) -> list:
@@ -188,6 +240,70 @@ def find_rooms_by_name(group_name: str) -> list:
     if not group_name:
         return []
     return [r for r in _load_rooms() if (r.get("nickname") or "").strip() == group_name]
+
+
+def _query_bool(query: dict, name: str, default: bool) -> bool:
+    """解析 refresh/include_members 这类布尔查询参数。"""
+    value = query.get(name, [None])[0]
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _query_optional_bool(query: dict, name: str):
+    """解析可选布尔查询参数；参数不存在时返回 None。"""
+    if name not in query:
+        return None
+    return _query_bool(query, name, False)
+
+
+def _group_api_response(path: str, query: dict):
+    """处理群列表和群成员查询，返回 (HTTP 状态码, JSON 数据)。"""
+    groups_path = _ROOM_GROUPS_PATH.rstrip("/")
+    refresh = _query_bool(query, "refresh", True)
+
+    if path == groups_path:
+        include_members = _query_bool(query, "include_members", False)
+        is_external = _query_optional_bool(query, "is_external")
+        rooms = _load_rooms(refresh=refresh)
+        if is_external is not None:
+            rooms = [
+                room for room in rooms
+                if bool(room.get("is_external")) is is_external
+            ]
+        groups = [
+            _room_payload(room, include_members=include_members, refresh=refresh)
+            for room in rooms
+        ]
+        return 200, {
+            "ok": True,
+            "count": len(groups),
+            "refresh": refresh,
+            "include_members": include_members,
+            "is_external": is_external,
+            "groups": groups,
+        }
+
+    members_suffix = "/members"
+    if path.startswith(groups_path + "/") and path.endswith(members_suffix):
+        group_id = unquote(path[len(groups_path) + 1:-len(members_suffix)]).strip()
+        if not group_id.startswith("R:"):
+            return 400, {"ok": False, "error": "group_id 格式不正确（须以 R: 开头）"}
+
+        room = _find_room(group_id, refresh=refresh)
+        if room is None:
+            return 404, {"ok": False, "error": "未找到群", "group_id": group_id}
+
+        members = _load_room_members(group_id, refresh=refresh)
+        return 200, {
+            "ok": True,
+            "refresh": refresh,
+            "group": _room_payload(room),
+            "member_count": len(members),
+            "members": members,
+        }
+
+    return None
 
 
 def _get_group_owner_id(group_id: str) -> str:
@@ -579,6 +695,18 @@ class _PushHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        query = parse_qs(urlparse(self.path).query)
+        result = _group_api_response(path, query)
+        if result is None:
+            self._send_json(404, {"ok": False, "error": "not found"})
+            return
+
+        status, payload = result
+        logger.info(f"[PushAPI] 群信息查询 path={path} refresh={query.get('refresh', ['true'])[0]}")
+        self._send_json(status, payload)
 
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"

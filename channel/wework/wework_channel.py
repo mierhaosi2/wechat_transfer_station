@@ -392,6 +392,7 @@ class WeworkChannel(ChatChannel):
 
             # 查外部群配置，welcomeEnabled=false 时跳过开场白
             group_config_url = conf().get("group_config_url", "")
+            remote_welcome_desc = None
             if group_config_url:
                 try:
                     full_url = f"{group_config_url}?groupId={group_id}"
@@ -400,24 +401,35 @@ class WeworkChannel(ChatChannel):
                     logger.info(f"[WX][入群欢迎] 群配置响应 status={resp.status_code} body={resp.text[:500]}")
                     resp.raise_for_status()
                     cfg = resp.json()
-                    welcome_enabled = cfg.get("data", cfg).get("welcomeEnabled", True)
+                    group_config = cfg.get("data", cfg)
+                    if not isinstance(group_config, dict):
+                        group_config = {}
+                    welcome_enabled = group_config.get("welcomeEnabled", True)
                     if not welcome_enabled:
                         logger.info(f"[WX][入群欢迎] 群={group_id} welcomeEnabled=false，跳过开场白")
                         return
                     else:
-                        logger.info(f"[WX][入群欢迎] 群={group_id} welcomeEnabled=true，继续发送开场白")
+                        if "welcomeDesc" in group_config:
+                            remote_welcome_desc = group_config["welcomeDesc"]
+                            logger.info(f"[WX][入群欢迎] 群={group_id} 使用接口 welcomeDesc={remote_welcome_desc!r}")
+                        else:
+                            logger.info(f"[WX][入群欢迎] 群={group_id} welcomeEnabled=true，接口未返回 welcomeDesc，使用本地开场白")
                 except Exception as e:
                     logger.warning(f"[WX][入群欢迎] 查询 group_config_url 失败，降级发送开场白: {e}")
             else:
                 logger.info(f"[WX][入群欢迎] group_config_url 未配置，直接发送开场白")
 
-            welcome_msg = conf().get("group_welcome_msg", "")
-            # 按 wechatcom_corp_id 查专属开场白，找不到再用通用 group_welcome_msg
-            corp_id = conf().get("wechatcom_corp_id", "")
-            welcome_msg_map = conf().get("group_welcome_msg_map", {})
-            if corp_id and corp_id in welcome_msg_map:
-                welcome_msg = welcome_msg_map[corp_id]
-                logger.info(f"[WX][入群欢迎] 使用 corp_id={corp_id} 专属开场白")
+            if remote_welcome_desc is not None:
+                welcome_msg = remote_welcome_desc
+                logger.info(f"[WX][入群欢迎] 使用群配置接口返回的 welcomeDesc")
+            else:
+                welcome_msg = conf().get("group_welcome_msg", "")
+                # 按 wechatcom_corp_id 查专属开场白，找不到再用通用 group_welcome_msg
+                corp_id = conf().get("wechatcom_corp_id", "")
+                welcome_msg_map = conf().get("group_welcome_msg_map", {})
+                if corp_id and corp_id in welcome_msg_map:
+                    welcome_msg = welcome_msg_map[corp_id]
+                    logger.info(f"[WX][入群欢迎] 使用 corp_id={corp_id} 专属开场白")
             at_list = []
             if welcome_msg:
                 # {owner} 替换为 @owner_name，并加入 at_list 实现真正的 @
@@ -428,6 +440,7 @@ class WeworkChannel(ChatChannel):
                     text = welcome_msg.replace("{nickname}", nickname).replace("{owner}", owner_name)
             else:
                 text = f"欢迎 {nickname} 加入群聊！😊"
+            logger.info(f"[WX][入群欢迎] 群={group_id} 最终发送开场白={text!r}")
             wework.send_text(group_id, text)
             return
         elif cmsg.ctype == ContextType.PATPAT:
