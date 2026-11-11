@@ -79,7 +79,7 @@ class ChatChannel(Channel):
                 context["session_id"] = session_id
                 context["receiver"] = group_id
             else:
-                context["session_id"] = cmsg.other_user_id
+                context["session_id"] = cmsg.actual_user_id or cmsg.other_user_id
                 context["receiver"] = cmsg.other_user_id
             e_context = PluginManager().emit_event(EventContext(Event.ON_RECEIVE_MESSAGE, {"channel": self, "context": context}))
             context = e_context["context"]

@@ -213,12 +213,17 @@ class WeworkMessage(ChatMessage):
             conversation_id = data.get('conversation_id')
             sender_name = data.get("sender_name")
 
-            self.from_user_id = user_id if sender_id == user_id else conversation_id
-            self.from_user_nickname = nickname if sender_id == user_id else sender_name
+            self.from_user_id = sender_id or user_id
+            self.from_user_nickname = sender_name or nickname
             self.to_user_id = user_id
             self.to_user_nickname = nickname
             self.other_user_nickname = sender_name
             self.other_user_id = conversation_id
+
+            if not self.actual_user_id:
+                self.actual_user_id = sender_id
+            if not self.actual_user_nickname:
+                self.actual_user_nickname = sender_name
 
             if self.is_group:
                 conversation_id = data.get('conversation_id') or data.get('room_conversation_id')
